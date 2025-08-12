@@ -1,71 +1,73 @@
 /*
- * styles/themes/themes熊熊假日.css
- * Curated by Coco for Professor Ryan
- * Bear's Holiday Theme
- * A cheerful and cozy theme inspired by summer fun and quiet nights.
+ * styles/themes/themes卡提西亚.css
+ * Curated by Roo for Professor Ryan
+ * New Palette Set: "Galactic Maiden" and "Fallen Knight"
+ * A theme of duality, capturing both serene divinity and shattered power.
  */
 
 /* * =================================================================
- * Dark Theme: Forest Night (静谧林夜)
- * Inspired by bears camping by a fire in a dark forest.
- * A cozy, serene, and warm theme.
+ * Dark Theme: Fallen Knight Palette (挥剑芙露德利斯)
+ * Inspired by a knight's resolve amidst a shattered, dark world.
+ * A powerful, sharp, and high-contrast theme.
  * =================================================================
  */
 :root {
     /* --- Wallpaper Interface --- */
-    --chat-wallpaper-dark: url('../assets/wallpaper/forest_night.jpg');
+    /*
+     * 壁纸是主题的灵魂！
+     * 使用方法: 确认图片路径正确, 建议将图片放入 ../assets/ 文件夹
+     * 例如: url('../assets/cartesia-dark.png')
+     */
+    --chat-wallpaper-dark: url('../assets/wallpaper/fleurdelys.png');
 
     /* --- Base Colors --- */
-    --primary-bg: #1a2a30;      /* 主背景 - 深青蓝色 */
-    --secondary-bg: #2c3e4a;    /* 侧边栏/面板背景 - 石板灰蓝 */
-    --tertiary-bg: #121e23;     /* 聊天区背景 - 近黑的深蓝 */
-    --accent-bg: #3a506b;       /* 悬停/选中背景 - 柔和钢蓝 */
-    --border-color: #3a506b;    /* 边框颜色 */
-    --input-bg: #222e35;        /* 输入框背景 */
+    --primary-bg: #0a0f14;      /* 主背景 - 深邃近黑的夜空 */
+    --secondary-bg: #141a22;    /* 侧边栏/面板背景 - 稍亮的暗蓝 */
+    --tertiary-bg: #05070a;     /* 聊天区背景 - 更纯粹的黑 */
+    --accent-bg: #2a5a75;       /* 悬停/选中背景 - 柔和的电光蓝 */
+    --border-color: #33c1ff;    /* 边框颜色 - 明亮的电光蓝 */
+    --input-bg: #141a22;        /* 输入框背景 */
 
-    --panel-bg-dark: rgba(44, 62, 74, 0.8); /* 基于--secondary-bg，增加80%不透明度 */
+    /* --- Frosted Panel Background --- */
+    --panel-bg-dark: rgba(20, 26, 34, 0.8); /* 基于--secondary-bg，增加80%不透明度 */
 
     /* --- Text Colors --- */
-    --primary-text: #e8e8e8;    /* 主要文字 - 熊熊的米白色 */
-    --secondary-text: #a0b8c8;  /* 次要/标题文字 - 柔和天空蓝 */
-    --highlight-text: #ffcb77;  /* 高亮文字 - 温暖的篝火黄 */
+    --primary-text: #eaeef9;    /* 主要文字 - 柔和的银白色 */
+    --secondary-text: #c8d1df;  /* 次要/标题文字 - 中性灰蓝 */
+    --highlight-text: #33c1ff;  /* 高亮文字 - 核心电光蓝 */
     --text-on-accent: #ffffff;  /* 在强调色背景上的文字 */
-    --placeholder-text: #6a7f8e; /* 输入框占位文字 */
-    --quoted-text: #fd9e54;     /* 引用文本颜色 - 温暖的篝火橙 */
-    --user-text: #e8e8e8;       /* 用户气泡文字 - 米白 */
-    --agent-text: #e8e8e8;      /* Agent气泡文字 - 米白 */
+    --placeholder-text: #6a7889; /* 输入框占位文字 */
+    --quoted-text: #33c1ff;     /* 引用文本颜色 */
+    --user-text: #e0f2f7;       /* 用户气泡文字 - 很浅的淡蓝色 */
+    --agent-text: #eaeef9;      /* Agent气泡文字 - 柔和的银白色 */
 
     /* --- Bubble Colors (Frosted Glass Ready) --- */
-    --user-bubble-bg: rgba(145, 109, 51, 0.573); /* 用户气泡 - 篝火黄 - 半透明 */
-    --assistant-bubble-bg: rgba(44, 62, 74, 0.577); /* AI气泡 - 深石板灰蓝 - 半透明 */
+    --user-bubble-bg: rgba(51, 193, 255, 0.15); /* 用户气泡 - 半透明电光蓝 */
+    --assistant-bubble-bg: rgba(168, 178, 192, 0.1); /* AI气泡 - 半透明灰蓝 */
 
     /* --- UI Element Colors --- */
-    --button-bg: #3a506b;           /* 按钮背景 - 柔和钢蓝 */
-    --button-hover-bg: #4a657a;      /* 按钮悬停 - 略亮的钢蓝 */
-    --danger-color: #e57373;        /* 危险操作 - 柔和红 */
-    --danger-hover-bg: #ef5350;
-    --success-color: #70c1b3;       /* 成功操作 - 森林的青绿色 */
-    --notification-bg: #2f3f4d;
-    --notification-header-bg: #34495e;
-    --notification-border: #ffcb77;
-    --tool-bubble-bg: rgba(58, 80, 107, 0.2); /* VCP工具调用气泡背景 - 半透明钢蓝 */
-    --tool-bubble-border: #ffcb77; /* VCP工具调用气泡边框 - 篝火黄 */
+    --button-bg: #33c1ff;           /* 按钮背景 - 电光蓝 */
+    --button-hover-bg: #66d3ff;      /* 按钮悬停 */
+    --danger-color: #e74c3c;        /* 危险操作 - 经典红 */
+    --danger-hover-bg: #c0392b;
+    --success-color: #00cec9;       /* 成功操作 - 薄荷青 */
+    --notification-bg: #141a22;
+    --notification-header-bg: #0a0f14;
+    --notification-border: #33c1ff;
+    --tool-bubble-bg: rgba(168, 178, 192, 0.15);
+    --tool-bubble-border: #33c1ff;
 
     /* --- Scrollbar --- */
-    --scrollbar-track: rgba(44, 62, 74, 0.5);
-    --scrollbar-thumb: rgba(100, 120, 130, 0.7);
-    --scrollbar-thumb-hover: rgba(120, 140, 150, 0.6);
+    --scrollbar-track: rgba(20, 26, 34, 0.5);
+    --scrollbar-thumb: rgba(42, 90, 117, 0.7);
+    --scrollbar-thumb-hover: rgba(51, 193, 255, 0.6);
 
-    /* --- Shimmer Effect for Loading --- */
-    --shimmer-color-transparent: rgba(232, 232, 232, 0.408);
-    --shimmer-color-highlight: rgba(232, 232, 232, 0.923);
+    /* --- 流式输出动画光晕 Shimmer Effect for Loading --- */
+    --shimmer-color-transparent: rgba(234, 239, 249, 0.1);
+    --shimmer-color-highlight: rgba(234, 239, 249, 0.8);
 
     /* --- Text Shadow for Frosted Panels --- */
     --panel-text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
-
-    /* --- Unified Panel Background --- */
-    --panel-bg: var(--panel-bg-dark);
-}
 
 body {
     background-image: var(--chat-wallpaper-dark);
@@ -73,11 +75,14 @@ body {
     background-position: center;
     background-attachment: fixed;
 }
+    /* --- Unified Panel Background --- */
+    --panel-bg: var(--panel-bg-dark);
+}
 
 /* * =================================================================
- * Light Theme: Watermelon Day (西瓜假日)
- * Inspired by bears playing in a watermelon pool.
- * A bright, cheerful, and summery theme.
+ * Light Theme: Maiden in the Sun Palette (阳光少女)
+ * Inspired by a gentle maiden resting in a sun-drenched garden.
+ * A bright, fresh, and heartwarming theme.
  * =================================================================
  */
 body.light-theme {
@@ -86,53 +91,56 @@ body.light-theme {
     background-size: cover;
     background-position: center;
     background-attachment: fixed;
+
     /* --- Wallpaper Interface --- */
-    --chat-wallpaper-light: url('../assets/wallpaper/watermelon_day.jpg');
+    /* 请将 'cartesia-garden.png' 替换为您新图片的文件名 */
+    --chat-wallpaper-light: url('../assets/wallpaper/cartethyia.png');
 
     /* --- Base Colors --- */
-    --primary-bg: #b9dbb9d5;      /* 主背景 - 柔和薄荷绿 */
-    --secondary-bg: #a2cccbcc;    /* 侧边栏 - 白色 */
-    --tertiary-bg: #cff3fbe8;     /* 聊天区 - 浅天蓝色 */
-    --accent-bg: #d0e8ef;       /* 悬停/选中背景 */
-    --border-color: #d0e8ef;    /* 边框 */
+    --primary-bg: #fdfaf2;      /* 主背景 - 阳光暖白 */
+    --secondary-bg: #f5f8f0;    /* 侧边栏 - 嫩芽白 */
+    --tertiary-bg: #ffffff;     /* 聊天区 - 纯净白 */
+    --accent-bg: #e0e8f5;       /* 悬停背景 - 浅天蓝 */
+    --border-color: #cce0d0;    /* 边框 - 薄荷绿 */
     --input-bg: #ffffff;        /* 输入框 */
 
-    --panel-bg-light: rgba(255, 255, 255, 0.85); /* 基于--secondary-bg，增加85%不透明度 */
+    /* --- Frosted Panel Background --- */
+    --panel-bg-light: rgba(245, 248, 240, 0.85); /* 基于--secondary-bg，增加85%不透明度 */
 
     /* --- Text Colors --- */
-    --primary-text: #3d405b;    /* 主要文字 - 深灰紫，像西瓜籽 */
-    --secondary-text: #5c8d89;  /* 次要/标题文字 - 鼠尾草绿 */
-    --highlight-text: #f25f5c;  /* 高亮文字 - 西瓜红 */
-    --text-on-accent: #ffffff;  /* 强调背景文字 */
-    --placeholder-text: #a0aab3; /* 占位文字 */
-    --quoted-text: #4a90e2;     /* 引用文字 - 阳伞蓝 */
-    --user-text: #3d405b;       /* 用户气泡文字 - 深灰紫 */
-    --agent-text: #3d405b;      /* Agent气泡文字 - 深灰紫 */
+    --primary-text: #4a443a;    /* 主要文字 - 深茶色 */
+    --secondary-text: #8a7e6d;  /* 次要文字 - 暖灰褐 */
+    --highlight-text: #00aaff;  /* 高亮文字 - 圣泉蓝 */
+    --text-on-accent: #4a443a;  /* 强调背景文字 */
+    --placeholder-text: #b0a89a; /* 占位文字 */
+    --quoted-text: #00aaff;     /* 引用文字 - 圣泉蓝 */
+    --user-text: #4a443a;       /* 用户气泡文字 - 深茶色 */
+    --agent-text: #4a443a;      /* Agent气泡文字 - 深茶色 */
 
     /* --- Bubble Colors --- */
-    --user-bubble-bg: rgba(236, 202, 202, 0.488); /* 用户气泡 - 西瓜红 - 半透明 */
-    --assistant-bubble-bg: rgba(233, 255, 233, 0.525); /* AI气泡 - 柔和薄荷绿 - 半透明 */
+    --user-bubble-bg: rgba(0, 170, 255, 0.1);     /* 用户气泡 - 半透明圣泉蓝 */
+    --assistant-bubble-bg: rgba(74, 68, 58, 0.05); /* AI气泡 - 半透明深茶色 */
 
     /* --- UI Element Colors --- */
-    --button-bg: #f25f5c;           /* 按钮 - 西瓜红 */
-    --button-hover-bg: #e04b48;     /* 按钮悬停 - 深一点的红 */
-    --danger-color: #e74c3c;        /* 危险色 - 红色 */
-    --danger-hover-bg: #c0392b;
-    --success-color: #70c1b3;       /* 成功色 - 清新绿，像西瓜皮 */
-    --notification-bg: #e8f4f8;
-    --notification-header-bg: #f0f0f0;
-    --notification-border: #f25f5c;
-    --tool-bubble-bg: rgba(224, 230, 235, 0.1); /* VCP工具调用气泡背景 - 半透明浅灰 */
-    --tool-bubble-border: #f25f5c; /* VCP工具调用气泡边框 - 西瓜红 */
+    --button-bg: #00aaff;           /* 按钮 - 圣泉蓝 */
+    --button-hover-bg: #33bbff;     /* 按钮悬停 */
+    --danger-color: #e57373;        /* 危险色 - 温和红 */
+    --danger-hover-bg: #ef5350;
+    --success-color: #81c784;       /* 成功色 - 柔和绿 */
+    --notification-bg: #f5f8f0;
+    --notification-header-bg: #fdfaf2;
+    --notification-border: #00aaff;
+    --tool-bubble-bg: rgba(129, 199, 132, 0.1);
+    --tool-bubble-border: #81c784;
 
     /* --- Scrollbar --- */
-    --scrollbar-track: rgba(200, 200, 200, 0.7);
-    --scrollbar-thumb: rgba(150, 150, 150, 0.8);
-    --scrollbar-thumb-hover: rgba(120, 120, 120, 0.6);
+    --scrollbar-track: rgba(245, 248, 240, 0.7);
+    --scrollbar-thumb: rgba(204, 224, 208, 0.8);
+    --scrollbar-thumb-hover: rgba(0, 170, 255, 0.6);
 
-    /* --- Shimmer Effect --- */
-    --shimmer-color-transparent: rgba(61, 64, 91, 0.04);
-    --shimmer-color-highlight: rgba(61, 64, 91, 0.08);
+    /* --- 流式输出动画光晕 Shimmer Effect --- */
+    --shimmer-color-transparent: rgba(74, 68, 58, 0.04);
+    --shimmer-color-highlight: rgba(74, 68, 58, 0.8);
 
     /* --- Unified Panel Background --- */
     --panel-bg: var(--panel-bg-light);
@@ -179,6 +187,7 @@ body.light-theme {
 /* 浅色主题下的柔和阴影 */
 body.light-theme .message-bubble {
     box-shadow: 
-        0 4px 20px rgba(45, 41, 34, 0.08),
+        0 4px 20px rgba(44, 62, 80, 0.08),
         inset 0 1px 0 rgba(255, 255, 255, 0.7);
 }
+
