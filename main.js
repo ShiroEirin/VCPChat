@@ -30,6 +30,7 @@ const themeHandlers = require('./modules/ipc/themeHandlers'); // Import theme ha
 const emoticonHandlers = require('./modules/ipc/emoticonHandlers'); // Import emoticon handlers
 const musicMetadata = require('music-metadata');
 const speechRecognizer = require('./modules/speechRecognizer'); // Import the new speech recognizer
+const canvasHandlers = require('./modules/ipc/canvasHandlers'); // Import canvas handlers
 
 // --- Configuration Paths ---
 // Data storage will be within the project's 'AppData' directory
@@ -45,6 +46,7 @@ const MUSIC_COVER_CACHE_DIR = path.join(APP_DATA_ROOT_IN_PROJECT, 'MusicCoverCac
 const NETWORK_NOTES_CACHE_FILE = path.join(APP_DATA_ROOT_IN_PROJECT, 'network-notes-cache.json'); // Cache for network notes
 const WALLPAPER_THUMBNAIL_CACHE_DIR = path.join(APP_DATA_ROOT_IN_PROJECT, 'WallpaperThumbnailCache');
 const RESAMPLE_CACHE_DIR = path.join(APP_DATA_ROOT_IN_PROJECT, 'ResampleCache');
+const CANVAS_CACHE_DIR = path.join(APP_DATA_ROOT_IN_PROJECT, 'canvas'); // Canvas cache directory
 
 // Define a specific agent ID for notes attachments
 const NOTES_AGENT_ID = 'notes_attachments_agent';
@@ -173,35 +175,6 @@ function createWindow() {
     });
 
     // Listen for theme changes and notify all relevant windows
-    nativeTheme.on('updated', () => {
-        const theme = nativeTheme.shouldUseDarkColors ? 'dark' : 'light';
-        console.log(`[Main] Theme updated to: ${theme}. Notifying windows.`);
-        
-        // Notify main window
-        if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('theme-updated', theme);
-        }
-        // Notify assistant bar
-        const { assistantWindow, assistantBarWindow } = assistantHandlers.getAssistantWindows();
-        if (assistantBarWindow && !assistantBarWindow.isDestroyed()) {
-            assistantBarWindow.webContents.send('theme-updated', theme);
-        }
-        // Notify assistant window
-        if (assistantWindow && !assistantWindow.isDestroyed()) {
-            assistantWindow.webContents.send('theme-updated', theme);
-        }
-        // Notify dice window
-        const diceWindow = diceHandlers.getDiceWindow();
-        if (diceWindow && !diceWindow.isDestroyed()) {
-            diceWindow.webContents.send('theme-updated', theme);
-        }
-        // Notify any other open child windows that might need theme updates
-        openChildWindows.forEach(win => {
-            if (win && !win.isDestroyed()) {
-                win.webContents.send('theme-updated', theme);
-            }
-        });
-    });
 }
 
 // --- App Lifecycle ---
@@ -236,6 +209,7 @@ if (!gotTheLock) {
     fs.ensureDirSync(MUSIC_COVER_CACHE_DIR);
     fs.ensureDirSync(WALLPAPER_THUMBNAIL_CACHE_DIR); // Ensure the thumbnail cache directory exists
     fs.ensureDirSync(RESAMPLE_CACHE_DIR); // Ensure the resample cache directory exists
+    fs.ensureDirSync(CANVAS_CACHE_DIR); // Ensure the canvas cache directory exists
     fileManager.initializeFileManager(USER_DATA_DIR, AGENT_DIR); // Initialize FileManager
     groupChat.initializePaths({ APP_DATA_ROOT_IN_PROJECT, AGENT_DIR, USER_DATA_DIR, SETTINGS_FILE }); // Initialize GroupChat paths
     settingsHandlers.initialize({ SETTINGS_FILE, USER_AVATAR_FILE, AGENT_DIR }); // Initialize settings handlers
@@ -441,6 +415,7 @@ if (!gotTheLock) {
     themeHandlers.initialize({ mainWindow, openChildWindows, projectRoot: PROJECT_ROOT, APP_DATA_ROOT_IN_PROJECT });
     emoticonHandlers.initialize({ SETTINGS_FILE, APP_DATA_ROOT_IN_PROJECT });
     emoticonHandlers.setupEmoticonHandlers();
+    canvasHandlers.initialize({ mainWindow, openChildWindows, CANVAS_CACHE_DIR });
  
      // --- Distributed Server Initialization ---
      (async () => {
@@ -455,7 +430,8 @@ if (!gotTheLock) {
                     debugMode: true, // Or read from settings if you add this option
                     rendererProcess: mainWindow.webContents, // Pass the renderer process object
                     handleMusicControl: musicHandlers.handleMusicControl, // Inject the music control handler
-                    handleDiceControl: diceHandlers.handleDiceControl // Inject the dice control handler
+                    handleDiceControl: diceHandlers.handleDiceControl, // Inject the dice control handler
+                    handleCanvasControl: handleCanvasControl // Inject the new canvas control handler
                 };
                 distributedServer = new DistributedServer(config);
                 distributedServer.initialize();
@@ -485,11 +461,6 @@ if (!gotTheLock) {
 
 
    // --- Assistant IPC Handlers are now in modules/ipc/assistantHandlers.js ---
-
-    // Add the central theme getter
-    ipcMain.handle('get-current-theme', () => {
-        return nativeTheme.shouldUseDarkColors ? 'dark' : 'light';
-    });
 
     // --- Theme IPC Handlers are now in modules/ipc/themeHandlers.js ---
 });
@@ -592,8 +563,7 @@ function formatTimestampForFilename(timestamp) {
     const hours = date.getHours().toString().padStart(2, '0');
     const minutes = date.getMinutes().toString().padStart(2, '0');
     const seconds = date.getSeconds().toString().padStart(2, '0');
-    const milliseconds = date.getMilliseconds().toString().padStart(3, '0');
-    return `${year}${month}${day}_${hours}${minutes}${seconds}_${milliseconds}`;
+    return `${year}${month}${day}_${hours}${minutes}${seconds}`;
 }
 
 // --- IPC Handlers ---
@@ -746,3 +716,55 @@ ipcMain.on('start-speech-recognition', (event) => {
 ipcMain.on('stop-speech-recognition', () => {
     speechRecognizer.stop();
 });
+
+ipcMain.handle('export-topic-as-markdown', async (event, exportData) => {
+    const { topicName, markdownContent } = exportData;
+
+    if (!topicName || !markdownContent) {
+        return { success: false, error: '缺少导出所需的必要信息（话题名称或内容）。' };
+    }
+
+    // 1. Show Save Dialog
+    const safeTopicName = topicName.replace(/[/\\?%*:|"<>]/g, '-');
+    const defaultFileName = `${safeTopicName}-${formatTimestampForFilename(Date.now())}.md`;
+    const { canceled, filePath } = await dialog.showSaveDialog(mainWindow, {
+        title: '导出话题为 Markdown',
+        defaultPath: defaultFileName,
+        filters: [
+            { name: 'Markdown 文件', extensions: ['md'] },
+            { name: '所有文件', extensions: ['*'] }
+        ]
+    });
+
+    if (canceled || !filePath) {
+        return { success: false, error: '用户取消了导出操作。' };
+    }
+
+    // 2. Write to File
+    try {
+        await fs.writeFile(filePath, markdownContent, 'utf8');
+        shell.showItemInFolder(filePath); // Open the folder containing the file
+        return { success: true, path: filePath };
+    } catch (e) {
+        console.error(`[Export] 写入Markdown文件失败:`, e);
+        return { success: false, error: `写入文件失败: ${e.message}` };
+    }
+});
+
+// --- Canvas Control Handler (for Distributed Server) ---
+async function handleCanvasControl(filePath) {
+    try {
+        if (!filePath) {
+            throw new Error('No filePath provided for canvas control.');
+        }
+
+        // The updated createCanvasWindow now handles both opening the window
+        // and loading the specific file, or focusing and loading if already open.
+        await canvasHandlers.createCanvasWindow(filePath);
+
+        return { status: 'success', message: 'Canvas window command processed.' };
+    } catch (error) {
+        console.error('[Main] handleCanvasControl error:', error);
+        return { status: 'error', message: error.message };
+    }
+}

@@ -456,8 +456,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         const highlightThemeStyle = document.getElementById('highlight-theme-style');
         if (highlightThemeStyle) {
             highlightThemeStyle.href = currentTheme === 'light'
-                ? "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-light.min.css"
-                : "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css";
+                ? "../vendor/atom-one-light.min.css"
+                : "../vendor/atom-one-dark.min.css";
         }
     }
 
@@ -501,7 +501,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             statusElement.textContent = 'Loading Pyodide script...';
             if (!window.loadPyodide) {
                 const script = document.createElement('script');
-                script.src = 'https://cdn.jsdelivr.net/pyodide/v0.25.1/full/pyodide.js';
+                script.src = '../vendor/pyodide.js';
                 document.head.appendChild(script);
                 await new Promise((resolve, reject) => {
                     script.onload = resolve;
@@ -509,7 +509,9 @@ document.addEventListener('DOMContentLoaded', async () => {
                 });
             }
             statusElement.textContent = 'Initializing Pyodide core... (this may take a moment)';
-            pyodide = await window.loadPyodide();
+            pyodide = await window.loadPyodide({
+                indexURL: "https://cdn.jsdelivr.net/pyodide/v0.25.1/full/"
+            });
             console.log("Pyodide initialized successfully.");
             return pyodide;
         } catch (error) {
@@ -524,12 +526,24 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // --- Start: Python Executors as requested ---
 
+    function displayPythonResult(outputContainer, result) {
+        const trimmedResult = result.trim();
+        // A simple check for HTML content. It looks for a string that starts with a tag.
+        const isHtml = /^<[a-z][\s\S]*>/i.test(trimmedResult);
+        if (isHtml) {
+            outputContainer.innerHTML = trimmedResult;
+        } else {
+            outputContainer.textContent = trimmedResult || 'Execution finished with no output.';
+        }
+    }
+
     async function py_safe_executor(code, outputContainer) {
         outputContainer.textContent = 'Preparing Python sandbox environment...';
         const pyodideInstance = await initializePyodide(outputContainer);
         if (!pyodideInstance) return;
 
         try {
+            // First, handle packages specified in comments
             const packageRegex = /^#\s*requires:\s*([a-zA-Z0-9_,\s-]+)/gm;
             const packages = new Set();
             let match;
@@ -542,11 +556,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
             if (packages.size > 0) {
                 const packageList = Array.from(packages);
-                outputContainer.textContent = `Installing required packages: ${packageList.join(', ')}...`;
-                await pyodideInstance.loadPackage("micropip");
-                const micropip = pyodideInstance.pyimport("micropip");
-                await micropip.install(packageList);
-                outputContainer.textContent = 'Packages installed. Executing code...';
+                outputContainer.textContent = `Loading required packages: ${packageList.join(', ')}...`;
+                await pyodideInstance.loadPackage(packageList);
+                outputContainer.textContent = 'Packages loaded. Executing code...';
             } else {
                 outputContainer.textContent = 'Executing code in sandbox...';
             }
@@ -555,15 +567,47 @@ document.addEventListener('DOMContentLoaded', async () => {
             let stderr = '';
             pyodideInstance.setStdout({ batched: (s) => { stdout += s + '\n'; } });
             pyodideInstance.setStderr({ batched: (s) => { stderr += s + '\n'; } });
+            
             await pyodideInstance.runPythonAsync(code);
 
             let result = '';
             if (stdout) result += stdout;
             if (stderr) result += `\n--- ERRORS ---\n${stderr}`;
-            outputContainer.textContent = result.trim() || 'Execution finished with no output.';
+            
+            displayPythonResult(outputContainer, result);
+
         } catch (error) {
-            console.error("Sandbox Python execution error:", error);
-            outputContainer.textContent = `Sandbox Execution Error:\n${error.toString()}`;
+            const errorMessage = error.toString();
+            const packageMatch = errorMessage.match(/await pyodide\.loadPackage\("([^"]+)"\)/) || errorMessage.match(/await micropip\.install\("([^"]+)"\)/);
+
+            if (packageMatch && packageMatch[1]) {
+                const missingPackage = packageMatch[1];
+                try {
+                    outputContainer.textContent = `Detected missing package: ${missingPackage}. Attempting to install...`;
+                    await pyodideInstance.loadPackage(missingPackage);
+                    outputContainer.textContent = `Package ${missingPackage} installed. Retrying execution...`;
+                    
+                    let stdout = '';
+                    let stderr = '';
+                    pyodideInstance.setStdout({ batched: (s) => { stdout += s + '\n'; } });
+                    pyodideInstance.setStderr({ batched: (s) => { stderr += s + '\n'; } });
+                    
+                    await pyodideInstance.runPythonAsync(code);
+
+                    let result = '';
+                    if (stdout) result += stdout;
+                    if (stderr) result += `\n--- ERRORS ---\n${stderr}`;
+                    
+                    displayPythonResult(outputContainer, result);
+
+                } catch (retryError) {
+                    console.error(`Sandbox Python execution error on retry for ${missingPackage}:`, retryError);
+                    outputContainer.textContent = `Sandbox Execution Error:\nFailed to install or run after installing '${missingPackage}'.\n${retryError.toString()}`;
+                }
+            } else {
+                console.error("Sandbox Python execution error:", error);
+                outputContainer.textContent = `Sandbox Execution Error:\n${error.toString()}`;
+            }
         }
     }
 
@@ -904,10 +948,10 @@ document.addEventListener('DOMContentLoaded', async () => {
                         const bodyStyles = document.body.classList.contains('light-theme')
                             ? 'color: #2c3e50; background-color: #ffffff;'
                             : 'color: #abb2bf; background-color: #282c34;';
-                        finalHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>HTML Preview</title><script src="https://cdn.jsdelivr.net/npm/animejs@3.2.1/lib/anime.min.js"><\/script><style>body { font-family: sans-serif; padding: 15px; margin: 0; ${bodyStyles} }</style></head><body>${codeContent}</body></html>`;
+                        finalHtml = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>HTML Preview</title><script src="../vendor/anime.min.js"><\/script><style>body { font-family: sans-serif; padding: 15px; margin: 0; ${bodyStyles} }</style></head><body>${codeContent}</body></html>`;
                     } else {
                         // If it's a full document, inject anime.js before the closing </head> tag
-                        finalHtml = finalHtml.replace('</head>', '<script src="https://cdn.jsdelivr.net/npm/animejs@3.2.1/lib/anime.min.js"><\/script></head>');
+                        finalHtml = finalHtml.replace('</head>', '<script src="../vendor/anime.min.js"><\/script></head>');
                     }
                     iframeDoc.write(finalHtml);
                     iframeDoc.close();
@@ -978,16 +1022,16 @@ document.addEventListener('DOMContentLoaded', async () => {
                             </style>
                         </head>
                         <body>
-                            <script type="importmap">
-                            {
-                                "imports": {
-                                    "three": "https://cdn.jsdelivr.net/npm/three@0.166.1/build/three.module.js",
-                                    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.166.1/examples/jsm/"
-                                }
-                            }
-                            <\/script>
-                            <script type="module">
+                            <script src="../vendor/three.min.js"><\/script>
+                            <script>
+                                // Defer execution until three.js is loaded
+                                window.addEventListener('load', () => {
+                                    try {
 ${codeContent}
+                                    } catch (e) {
+                                        document.body.innerHTML = '<div style="color: #ff5555; font-family: sans-serif; padding: 20px;"><h3>An error occurred while running the script:</h3><pre>' + e.stack + '</pre></div>';
+                                    }
+                                });
                             <\/script>
                         </body>
                         </html>

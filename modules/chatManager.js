@@ -21,6 +21,7 @@ window.chatManager = (() => {
     
     // Functions from main renderer
     let mainRendererFunctions = {};
+    let isCanvasWindowOpen = false; // State to track if the canvas window is open
 
     /**
      * Initializes the ChatManager module.
@@ -50,6 +51,12 @@ window.chatManager = (() => {
         mainRendererFunctions = config.mainRendererFunctions;
 
         console.log('[ChatManager] Initialized successfully.');
+
+        // Listen for Canvas events
+        if (electronAPI) {
+            electronAPI.onCanvasContentUpdate(handleCanvasContentUpdate);
+            electronAPI.onCanvasWindowClosed(handleCanvasWindowClosed);
+        }
     }
 
     // --- Functions moved from renderer.js ---
@@ -385,7 +392,7 @@ window.chatManager = (() => {
 
     async function handleSendMessage() {
         const { messageInput } = elements;
-        const content = messageInput.value.trim();
+        let content = messageInput.value.trim(); // Use let as it might be modified
         const attachedFiles = attachedFilesRef.get();
         const currentSelectedItem = currentSelectedItemRef.get();
         const currentTopicId = currentTopicIdRef.get();
@@ -422,8 +429,10 @@ window.chatManager = (() => {
         }
 
         // --- Standard Agent Message Sending ---
+        // The 'content' variable still holds the user's raw input, including the placeholder.
+        // We will resolve the placeholder later, only for the final message sent to VCP.
         let contentForVCP = content;
-
+ 
         const uiAttachments = [];
         if (attachedFiles.length > 0) {
             for (const af of attachedFiles) {
@@ -465,6 +474,11 @@ window.chatManager = (() => {
         messageInput.value = '';
         attachedFilesRef.set([]);
         if(mainRendererFunctions.updateAttachmentPreview) mainRendererFunctions.updateAttachmentPreview();
+        
+        // After sending, if the canvas window is still open, restore the placeholder
+        if (isCanvasWindowOpen) {
+            messageInput.value = CANVAS_PLACEHOLDER;
+        }
         uiHelper.autoResizeTextarea(messageInput);
         // messageInput.focus(); // 核心修正：注释掉此行。这是导致AI流式输出时，即使向上滚动也会被强制拉回底部的根源。
 
@@ -496,7 +510,25 @@ window.chatManager = (() => {
                 let currentMessageTextContent = msg.content;
 
                 if (msg.role === 'user' && msg.id === userMessage.id) {
-                    currentMessageTextContent = contentForVCP;
+                    // This is the current user message being sent. Resolve the placeholder now.
+                    if (contentForVCP.includes(CANVAS_PLACEHOLDER)) {
+                        try {
+                            const canvasData = await electronAPI.getLatestCanvasContent();
+                            if (canvasData && !canvasData.error) {
+                                const formattedCanvasContent = `\n[Canvas Content]\n${canvasData.content || ''}\n[Canvas Path]\n${canvasData.path || 'No file path'}\n[Canvas Errors]\n${canvasData.errors || 'No errors'}\n`;
+                                // Replace all occurrences in this specific message's content
+                                currentMessageTextContent = contentForVCP.replace(new RegExp(CANVAS_PLACEHOLDER, 'g'), formattedCanvasContent);
+                            } else {
+                                console.error("Failed to get latest canvas content:", canvasData?.error);
+                                currentMessageTextContent = contentForVCP.replace(new RegExp(CANVAS_PLACEHOLDER, 'g'), '\n[Canvas content could not be loaded]\n');
+                            }
+                        } catch (error) {
+                            console.error("Error fetching canvas content:", error);
+                            currentMessageTextContent = contentForVCP.replace(new RegExp(CANVAS_PLACEHOLDER, 'g'), '\n[Error loading canvas content]\n');
+                        }
+                    } else {
+                        currentMessageTextContent = contentForVCP;
+                    }
                 } else if (msg.attachments && msg.attachments.length > 0) {
                     let historicalAppendedText = "";
                     for (const att of msg.attachments) {
@@ -833,6 +865,79 @@ window.chatManager = (() => {
         }
     }
 
+    async function handleForwardMessage(target, content, attachments) {
+        const { messageInput } = elements;
+        
+        // 1. Find the target item's full config to select it
+        let targetItemFullConfig;
+        if (target.type === 'agent') {
+            targetItemFullConfig = await electronAPI.getAgentConfig(target.id);
+        } else {
+            targetItemFullConfig = await electronAPI.getAgentGroupConfig(target.id);
+        }
+
+        if (!targetItemFullConfig || targetItemFullConfig.error) {
+            uiHelper.showToastNotification(`转发失败: 无法获取目标配置。`, 'error');
+            return;
+        }
+
+        // 2. Select the item. This will automatically handle finding the last active topic or creating a new one.
+        await selectItem(target.id, target.type, target.name, targetItemFullConfig.avatarUrl, targetItemFullConfig);
+
+        // 3. After a brief delay to allow the UI to update from selectItem, populate and send.
+        setTimeout(async () => {
+            // 4. Populate the message input and attachments ref
+            messageInput.value = content;
+            
+            const uiAttachments = attachments.map(att => ({
+                file: { name: att.name, type: att.type, size: att.size },
+                localPath: att.src,
+                originalName: att.name,
+                _fileManagerData: att._fileManagerData || {}
+            }));
+            attachedFilesRef.set(uiAttachments);
+            
+            // Manually trigger attachment preview update
+            if (mainRendererFunctions.updateAttachmentPreview) {
+                mainRendererFunctions.updateAttachmentPreview();
+            }
+            
+            // Manually trigger textarea resize
+            uiHelper.autoResizeTextarea(messageInput);
+
+            // 5. Call the standard send message handler to trigger the full AI response flow
+            await handleSendMessage();
+
+        }, 200); // 200ms delay seems reasonable for UI transition
+    }
+
+    // --- Canvas Integration ---
+    const CANVAS_PLACEHOLDER = '{{VCPChatCanvas}}';
+
+    function handleCanvasContentUpdate(data) {
+        isCanvasWindowOpen = true;
+        const { messageInput } = elements;
+        // If the canvas is open and there's content, ensure the placeholder is in the input
+        if (!messageInput.value.includes(CANVAS_PLACEHOLDER)) {
+            // Add a space for better formatting if the input is not empty
+            const prefix = messageInput.value.length > 0 ? ' ' : '';
+            messageInput.value += prefix + CANVAS_PLACEHOLDER;
+            uiHelper.autoResizeTextarea(messageInput);
+        }
+    }
+
+    function handleCanvasWindowClosed() {
+        isCanvasWindowOpen = false;
+        const { messageInput } = elements;
+        // Remove the placeholder when the window is closed
+        if (messageInput.value.includes(CANVAS_PLACEHOLDER)) {
+            // Also remove any surrounding whitespace for cleanliness
+            messageInput.value = messageInput.value.replace(new RegExp(`\\s*${CANVAS_PLACEHOLDER}\\s*`, 'g'), '').trim();
+            uiHelper.autoResizeTextarea(messageInput);
+        }
+    }
+
+
     // --- Public API ---
     return {
         init,
@@ -845,5 +950,6 @@ window.chatManager = (() => {
         displayNoItemSelected,
         attemptTopicSummarizationIfNeeded,
         handleCreateBranch,
+        handleForwardMessage,
     };
 })();

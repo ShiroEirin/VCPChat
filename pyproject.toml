@@ -15,6 +15,11 @@ sounddevice = "*"
 numpy = "*"
 pydub = "*"
 gevent-websocket = "*"
+<<<<<<< HEAD
+=======
+scipy = "*"
+gevent = "*"
+>>>>>>> origin/main
 
 [build-system]
 requires = ["poetry-core"]
