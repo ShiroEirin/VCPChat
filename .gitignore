@@ -70,3 +70,7 @@ start.bat
 
 # IDE/Editor history files
 .history
+
+# Claude CLI data
+.claude/
+nul
