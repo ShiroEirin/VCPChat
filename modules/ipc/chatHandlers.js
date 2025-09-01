@@ -636,6 +636,17 @@ ipcMain.handle('get-original-message-content', async (event, itemId, itemType, t
                 return { error: `请求体序列化失败: ${serializeError.message}` };
             }
     
+            // 调试日志：打印完整的请求信息
+            console.log('--- VCP Request Start ---');
+            console.log('Final URL:', finalVcpUrl);
+            console.log('Method:', 'POST');
+            console.log('Headers:', {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${vcpApiKey ? '***' : 'Not Set'}`
+            });
+            console.log('Body Preview:', serializedBody.substring(0, 500) + (serializedBody.length > 500 ? '...' : ''));
+            console.log('--- VCP Request End ---');
+
             const response = await fetch(finalVcpUrl, {
                 method: 'POST',
                 headers: {
@@ -647,6 +658,12 @@ ipcMain.handle('get-original-message-content', async (event, itemId, itemType, t
     
             if (!response.ok) {
                 const errorText = await response.text();
+                // 调试日志：打印完整的错误响应
+                console.log('--- VCP Error Response Start ---');
+                console.log('Status Code:', response.status);
+                console.log('Status Text:', response.statusText);
+                console.log('Response Body:', errorText);
+                console.log('--- VCP Error Response End ---');
                 console.error(`[Main - sendToVCP] VCP请求失败. Status: ${response.status}, Response Text:`, errorText);
                 let errorData = { message: `服务器返回状态 ${response.status}`, details: errorText };
                 try {

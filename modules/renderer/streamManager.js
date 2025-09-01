@@ -267,6 +267,53 @@ export function appendStreamChunk(messageId, chunkData, context) {
         }
         preBufferedChunks.get(messageId).push({ chunk: chunkData, context });
         console.log(`[StreamManager] Pre-buffering chunk for uninitialized message ${messageId}`);
+        
+        // 🔧 修复：尝试立即初始化消息（如果可能）
+        // 对于非流式响应或者某些情况下，可能不会调用startStreamingMessage
+        // 我们需要确保消息能被处理
+        if (!messageInitializationStatus.has(messageId)) {
+            messageInitializationStatus.set(messageId, 'pending');
+            console.log(`[StreamManager] Auto-initializing message ${messageId} due to incoming chunk`);
+            
+            // 尝试创建基本的消息结构
+            const currentChatHistoryArray = refs.currentChatHistoryRef.get();
+            const existingMessage = currentChatHistoryArray.find(msg => msg.id === messageId);
+            
+            if (!existingMessage && context) {
+                // 如果消息不存在，创建一个基础版本
+                const basicMessage = {
+                    id: messageId,
+                    role: 'assistant',
+                    name: context.agentName || 'Assistant',
+                    content: '',
+                    timestamp: Date.now(),
+                    isThinking: false,
+                    finishReason: null
+                };
+                
+                if (context.isGroupMessage) {
+                    basicMessage.isGroupMessage = true;
+                    basicMessage.groupId = context.groupId;
+                    basicMessage.topicId = context.topicId;
+                    basicMessage.agentId = context.agentId;
+                    basicMessage.avatarUrl = context.avatarUrl;
+                    basicMessage.avatarColor = context.avatarColor;
+                }
+                
+                currentChatHistoryArray.push(basicMessage);
+                refs.currentChatHistoryRef.set([...currentChatHistoryArray]);
+            }
+            
+            // 立即标记为ready并处理缓冲的chunks
+            messageInitializationStatus.set(messageId, 'ready');
+            const bufferedChunks = preBufferedChunks.get(messageId) || [];
+            preBufferedChunks.delete(messageId);
+            
+            // 递归处理所有缓冲的chunks
+            for (const bufferedChunk of bufferedChunks) {
+                appendStreamChunk(messageId, bufferedChunk.chunk, bufferedChunk.context);
+            }
+        }
         return;
     }
     
