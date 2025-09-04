@@ -36,6 +36,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let VCP_API_KEY = '';
     let USER_NAME = 'Human'; // Default value in case it's not found
     let settings = {}; // Make settings available in a wider scope
+    let MAX_FILENAME_LENGTH = 400; // 默认最大文件名长度
     const settingsPath = path.join(__dirname, '..', 'AppData', 'settings.json');
 
     function loadSettings() {
@@ -66,6 +67,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         VCP_API_KEY = settings.vcpApiKey || '';
         USER_NAME = settings.userName || 'Human';
+        MAX_FILENAME_LENGTH = settings.maxFilenameLength || 400;
 
         if (!VCP_SERVER_URL || !VCP_API_KEY) {
             throw new Error('未能从 settings.json 中找到 vcpServerUrl 或 vcpApiKey');
@@ -91,12 +93,26 @@ document.addEventListener('DOMContentLoaded', () => {
             ]
         },
         'DoubaoGen': {
-            displayName: '豆包图片生成',
-            description: '国产文生图，支持中文和任意分辨率，适合平面设计。',
-            params: [
-                { name: 'prompt', type: 'textarea', required: true, placeholder: '详细的提示词，可包含中文' },
-                { name: 'resolution', type: 'text', required: true, placeholder: '例如: 800x600', default: '1024x1024' }
-            ]
+            displayName: '豆包 AI 图片',
+            description: '集成豆包模型的图片生成与编辑功能。',
+            commands: {
+                'DoubaoGenerateImage': {
+                    description: '豆包生图',
+                    params: [
+                        { name: 'prompt', type: 'textarea', required: true, placeholder: '(必需) 用于图片生成的详细提示词。' },
+                        { name: 'resolution', type: 'text', required: true, placeholder: '(必需) 图片分辨率，格式为“宽x高”。理论上支持2048以内内任意分辨率组合。', default: '1024x1024' }
+                    ]
+                },
+                'DoubaoEditImage': {
+                    description: '豆包修图',
+                    params: [
+                        { name: 'prompt', type: 'textarea', required: true, placeholder: '(必需) 用于指导图片修改的详细提示词。' },
+                        { name: 'image', type: 'dragdrop_image', required: true, placeholder: '(必需) 用于图生图的图片来源，可以是公网可访问的 https URL，或者是分布式服务器的本地文件路径 (格式为 file:///...)。也可以是直接的database64url' },
+                        { name: 'resolution', type: 'text', required: true, placeholder: '(必需) 图片分辨率，格式为“宽x高”，可设为“adaptive”以自适应原图尺寸。', default: 'adaptive' },
+                        { name: 'guidance_scale', type: 'number', required: false, placeholder: '范围0-10，控制与原图的相似度，值越小越相似。' }
+                    ]
+                }
+            }
         },
         'SunoGen': {
             displayName: 'Suno 音乐生成',
@@ -230,6 +246,37 @@ document.addEventListener('DOMContentLoaded', () => {
                 { name: 'width', type: 'number', required: false, placeholder: '默认使用用户配置的值' },
                 { name: 'height', type: 'number', required: false, placeholder: '默认使用用户配置的值' }
             ]
+        },
+        // NanoBanana 图像生成
+        'NanoBananaGenOR': {
+            displayName: 'Gemini 2.5 NanoBanana 图像生成',
+            description: '使用 OpenRouter 接口调用 Google Gemini 2.5 Flash Image Preview 模型进行高级的图像生成和编辑。支持代理和多密钥随机选择。',
+            commands: {
+                'generate': {
+                    description: '生成一张全新的图片',
+                    params: [
+                        { name: 'enable_translation', type: 'checkbox', description: '启用提示词翻译(中文→英文)', default: false },
+                        { name: 'prompt', type: 'textarea', required: true, placeholder: '详细的提示词，用于图片生成。开启翻译时支持中文，否则请使用英文。例如：一个美丽的日落山景，色彩绒烂，云彩壮观' }
+                    ]
+                },
+                'edit': {
+                    description: '编辑一张现有的图片',
+                    params: [
+                        { name: 'enable_translation', type: 'checkbox', description: '启用提示词翻译(中文→英文)', default: false },
+                        { name: 'prompt', type: 'textarea', required: true, placeholder: '描述如何编辑图片的详细指令。开启翻译时支持中文，否则请使用英文。例如：在天空中添加一道彩虹，让颜色更加鲜艳' },
+                        { name: 'image_url', type: 'dragdrop_image', required: true, placeholder: '要编辑的图片URL或拖拽图片文件到此处' }
+                    ]
+                },
+                'compose': {
+                    description: '合成多张图片',
+                    params: [
+                        { name: 'enable_translation', type: 'checkbox', description: '启用提示词翻译(中文→英文)', default: false },
+                        { name: 'prompt', type: 'textarea', required: true, placeholder: '描述如何合成多张图片的详细指令。开启翻译时支持中文，否则请使用英文。例如：使用第一张图的背景和第二张图的人物创建一个奇幻场景' },
+                        { name: 'image_url_1', type: 'dragdrop_image', required: true, placeholder: '第一张图片的URL或拖拽图片文件到此处' }
+                    ],
+                    dynamicImages: true
+                }
+            }
         }
     };
 
@@ -289,23 +336,54 @@ document.addEventListener('DOMContentLoaded', () => {
             toolForm.appendChild(paramsContainer);
 
             commandSelect.addEventListener('change', (e) => {
-                renderFormParams(tool.commands[e.target.value].params, paramsContainer);
+                renderFormParams(tool.commands[e.target.value].params, paramsContainer, toolName, e.target.value);
             });
-            renderFormParams(tool.commands[commandSelect.value].params, paramsContainer);
+            renderFormParams(tool.commands[commandSelect.value].params, paramsContainer, toolName, commandSelect.value);
 
         } else {
             toolForm.appendChild(paramsContainer);
-            renderFormParams(tool.params, paramsContainer);
+            renderFormParams(tool.params, paramsContainer, toolName);
         }
 
         // 添加按钮容器
         const buttonContainer = document.createElement('div');
-        buttonContainer.style.cssText = 'display: flex; gap: 10px; margin-top: 15px;';
+        buttonContainer.style.cssText = 'display: flex; gap: 10px; margin-top: 15px; flex-wrap: wrap;';
         
         const submitButton = document.createElement('button');
         submitButton.type = 'submit';
         submitButton.textContent = '执行';
+        submitButton.style.cssText = `
+            background-color: var(--success-color);
+            color: var(--text-on-accent);
+            border: none;
+            padding: 12px 25px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.2s;
+        `;
         buttonContainer.appendChild(submitButton);
+        
+        // 添加全部清空按钮
+        const clearAllButton = document.createElement('button');
+        clearAllButton.type = 'button';
+        clearAllButton.innerHTML = '🗑️ 全部清空';
+        clearAllButton.style.cssText = `
+            background-color: var(--warning-color, #f59e0b);
+            color: white;
+            border: none;
+            padding: 12px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s;
+        `;
+        
+        clearAllButton.addEventListener('click', () => {
+            clearAllFormData(toolName);
+        });
+        
+        buttonContainer.appendChild(clearAllButton);
 
         // 为 ComfyUI 工具添加设置按钮
         if (toolName === 'ComfyUIGen') {
@@ -326,9 +404,13 @@ document.addEventListener('DOMContentLoaded', () => {
         };
     }
 
-    function renderFormParams(params, container) {
+    function renderFormParams(params, container, toolName = '', commandName = '') {
         container.innerHTML = '';
         const dependencyListeners = [];
+
+        // 检查是否为 NanoBananaGenOR 的 compose 命令
+        const isNanoBananaCompose = toolName === 'NanoBananaGenOR' && commandName === 'compose';
+        let imageUrlCounter = 1; // 用于动态图片输入框的计数器
 
         params.forEach(param => {
             const paramGroup = document.createElement('div');
@@ -369,15 +451,59 @@ document.addEventListener('DOMContentLoaded', () => {
                         dependencyListeners.forEach(listener => listener());
                     });
                 });
+            } else if (param.type === 'dragdrop_image') {
+                // 创建拖拽上传图片输入框
+                input = createDragDropImageInput(param);
+            } else if (param.type === 'checkbox') {
+                input = document.createElement('div');
+                input.className = 'checkbox-group';
+                
+                const checkboxLabel = document.createElement('label');
+                checkboxLabel.className = 'checkbox-label';
+                checkboxLabel.style.cssText = `
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    cursor: pointer;
+                    margin-top: 5px;
+                `;
+                
+                const checkbox = document.createElement('input');
+                checkbox.type = 'checkbox';
+                checkbox.name = param.name;
+                checkbox.checked = param.default || false;
+                
+                const checkboxText = document.createElement('span');
+                checkboxText.textContent = param.description || param.name;
+                
+                checkboxLabel.appendChild(checkbox);
+                checkboxLabel.appendChild(checkboxText);
+                input.appendChild(checkboxLabel);
+                
+                // 添加翻译相关的UI元素
+                if (param.name === 'enable_translation') {
+                    const translationContainer = createTranslationContainer(param.name);
+                    input.appendChild(translationContainer);
+                    
+                    // 监听 checkbox 状态变化
+                    checkbox.addEventListener('change', (e) => {
+                        const container = input.querySelector('.translation-container');
+                        if (container) {
+                            container.style.display = e.target.checked ? 'block' : 'none';
+                        }
+                    });
+                }
             } else {
                 input = document.createElement('input');
                 input.type = param.type || 'text';
             }
             
-            if (input.tagName !== 'DIV') {
+            if (input.tagName !== 'DIV' || param.type === 'dragdrop_image') {
                 input.name = param.name;
-                input.placeholder = param.placeholder || '';
-                if (param.default) input.value = param.default;
+                if (param.type !== 'dragdrop_image') {
+                    input.placeholder = param.placeholder || '';
+                    if (param.default) input.value = param.default;
+                }
                 if (param.required) input.required = true;
             } else {
                 // For radio group, we need a hidden input to carry the name for FormData
@@ -405,23 +531,1252 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
 
+        // 如果是 NanoBanana compose 模式，添加动态图片管理区域
+        if (isNanoBananaCompose) {
+            createDynamicImageContainer(container);
+        }
+
         dependencyListeners.forEach(listener => listener());
+    }
+
+    // 创建翻译容器
+    function createTranslationContainer(paramName) {
+        const container = document.createElement('div');
+        container.className = 'translation-container';
+        container.style.cssText = `
+            display: none;
+            margin-top: 10px;
+            padding: 15px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            background: rgba(59, 130, 246, 0.05);
+        `;
+        
+        // 翻译设置区域
+        const settingsArea = document.createElement('div');
+        settingsArea.style.cssText = `
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+        `;
+        
+        const qualityLabel = document.createElement('label');
+        qualityLabel.textContent = '质量：';
+        qualityLabel.style.cssText = `
+            font-weight: bold;
+            color: var(--secondary-text);
+            font-size: 14px;
+        `;
+        
+        const qualitySelect = document.createElement('select');
+        qualitySelect.className = 'translation-quality-select';
+        qualitySelect.innerHTML = `
+            <option value="gemini-2.5-flash-lite-preview-06-17">快速</option>
+            <option value="gemini-2.5-flash" selected>均衡</option>
+            <option value="gemini-2.5-pro">质量</option>
+        `;
+        qualitySelect.style.cssText = `
+            padding: 6px 12px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background: var(--input-bg);
+            color: var(--primary-text);
+        `;
+        
+        const languageLabel = document.createElement('label');
+        languageLabel.textContent = '目标语言：';
+        languageLabel.style.cssText = `
+            font-weight: bold;
+            color: var(--secondary-text);
+            font-size: 14px;
+        `;
+        
+        const languageSelect = document.createElement('select');
+        languageSelect.className = 'translation-language-select';
+        languageSelect.innerHTML = `
+            <option value="en" selected>英语</option>
+            <option value="zh">中文</option>
+            <option value="ja">日语</option>
+            <option value="ko">韩语</option>
+            <option value="fr">法语</option>
+            <option value="de">德语</option>
+            <option value="es">西班牙语</option>
+        `;
+        languageSelect.style.cssText = `
+            padding: 6px 12px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background: var(--input-bg);
+            color: var(--primary-text);
+        `;
+        
+        settingsArea.appendChild(qualityLabel);
+        settingsArea.appendChild(qualitySelect);
+        settingsArea.appendChild(languageLabel);
+        settingsArea.appendChild(languageSelect);
+        
+        const translatedPromptLabel = document.createElement('label');
+        translatedPromptLabel.textContent = '翻译后的提示词：';
+        translatedPromptLabel.style.cssText = `
+            display: block;
+            margin-bottom: 8px;
+            font-weight: bold;
+            color: var(--secondary-text);
+        `;
+        
+        const translatedPromptArea = document.createElement('textarea');
+        translatedPromptArea.className = 'translated-prompt';
+        translatedPromptArea.placeholder = '翻译结果将显示在这里…';
+        translatedPromptArea.readOnly = false; // 允许用户编辑
+        translatedPromptArea.style.cssText = `
+            width: 100%;
+            min-height: 80px;
+            padding: 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background: var(--input-bg);
+            color: var(--primary-text);
+            font-family: inherit;
+            resize: vertical;
+            box-sizing: border-box;
+        `;
+        
+        const buttonGroup = document.createElement('div');
+        buttonGroup.style.cssText = `
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+        `;
+        
+        const translateButton = document.createElement('button');
+        translateButton.type = 'button';
+        translateButton.innerHTML = '🌍 翻译';
+        translateButton.style.cssText = `
+            background: var(--primary-color);
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        `;
+        
+        const retranslateButton = document.createElement('button');
+        retranslateButton.type = 'button';
+        retranslateButton.innerHTML = '🔄 重新翻译';
+        retranslateButton.style.cssText = `
+            background: var(--secondary-color, #6b7280);
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        `;
+        
+        const useOriginalButton = document.createElement('button');
+        useOriginalButton.type = 'button';
+        useOriginalButton.innerHTML = '⬅️ 使用原文';
+        useOriginalButton.style.cssText = `
+            background: var(--warning-color, #f59e0b);
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        `;
+        
+        // 翻译功能
+        translateButton.addEventListener('click', async () => {
+            const promptTextarea = toolForm.querySelector('textarea[name="prompt"]');
+            if (promptTextarea && promptTextarea.value.trim()) {
+                const quality = qualitySelect.value;
+                const targetLang = languageSelect.value;
+                await translatePrompt(promptTextarea.value, translatedPromptArea, translateButton, quality, targetLang);
+            } else {
+                alert('请先输入提示词');
+            }
+        });
+        
+        // 重新翻译
+        retranslateButton.addEventListener('click', async () => {
+            const promptTextarea = toolForm.querySelector('textarea[name="prompt"]');
+            if (promptTextarea && promptTextarea.value.trim()) {
+                const quality = qualitySelect.value;
+                const targetLang = languageSelect.value;
+                await translatePrompt(promptTextarea.value, translatedPromptArea, translateButton, quality, targetLang);
+            } else {
+                alert('请先输入提示词');
+            }
+        });
+        
+        // 使用原文
+        useOriginalButton.addEventListener('click', () => {
+            const promptTextarea = toolForm.querySelector('textarea[name="prompt"]');
+            if (promptTextarea) {
+                translatedPromptArea.value = promptTextarea.value;
+            }
+        });
+        
+        buttonGroup.appendChild(translateButton);
+        buttonGroup.appendChild(retranslateButton);
+        buttonGroup.appendChild(useOriginalButton);
+        
+        container.appendChild(settingsArea);
+        container.appendChild(translatedPromptLabel);
+        container.appendChild(translatedPromptArea);
+        container.appendChild(buttonGroup);
+        
+        return container;
+    }
+
+    // 翻译提示词
+    async function translatePrompt(text, outputTextarea, button, quality = 'gemini-2.5-flash', targetLang = 'en') {
+        const originalText = button.innerHTML;
+        button.innerHTML = '🔄 翻译中...';
+        button.disabled = true;
+        
+        try {
+            // 获取目标语言名称
+            const languageMap = {
+                'en': '英语',
+                'zh': '中文', 
+                'ja': '日语',
+                'ko': '韩语',
+                'fr': '法语',
+                'de': '德语',
+                'es': '西班牙语'
+            };
+            
+            const targetLanguageText = languageMap[targetLang] || '英语';
+            
+            // 构建系统提示词（与 VCPChat 翻译模块保持一致）
+            const systemPrompt = `你是一个专业的翻译助手。请将用户提供的文本翻译成${targetLanguageText}。 仅返回翻译结果，不要包含任何解释或额外信息。`;
+            
+            const messages = [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: text }
+            ];
+            
+            // 使用 VCP 的 chat 接口进行翻译
+            const chatUrl = VCP_SERVER_URL.replace('/v1/human/tool', '/v1/chat/completions');
+            const response = await fetch(chatUrl, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${VCP_API_KEY}`
+                },
+                body: JSON.stringify({
+                    messages: messages,
+                    model: quality,
+                    temperature: 0.7,
+                    max_tokens: 50000,
+                    stream: false
+                })
+            });
+            
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`服务器错误: ${response.status} ${response.statusText} - ${errorText}`);
+            }
+            
+            const result = await response.json();
+            const translation = result.choices?.[0]?.message?.content;
+            
+            if (translation) {
+                outputTextarea.value = translation.trim();
+            } else {
+                throw new Error('API 返回的响应中没有有效的翻译内容。');
+            }
+        } catch (error) {
+            console.error('翻译失败:', error);
+            outputTextarea.value = `翻译失败: ${error.message}\n\n原文: ${text}`;
+        } finally {
+            button.innerHTML = originalText;
+            button.disabled = false;
+        }
+    }
+
+    // 后备翻译方法（简单的关键词识别）
+    async function fallbackTranslate(text) {
+        // 这里可以实现一个简单的翻译逻辑或者调用其他翻译服务
+        // 目前直接返回原文，用户可以手动修改
+        return text;
+    }
+
+    // 全部清空功能
+    function clearAllFormData(toolName) {
+        const confirmed = confirm('确定要清空所有内容吗？包括提示词、翻译内容、图片和额外图片。');
+        
+        if (!confirmed) return;
+        
+        // 1. 清空所有输入框
+        const inputs = toolForm.querySelectorAll('input, textarea, select');
+        inputs.forEach(input => {
+            if (input.type === 'checkbox' || input.type === 'radio') {
+                input.checked = input.defaultChecked || false;
+            } else if (input.tagName === 'SELECT') {
+                input.selectedIndex = 0; // 重置为默认选项
+            } else {
+                input.value = '';
+            }
+        });
+        
+        // 2. 清空翻译容器
+        const translationContainers = toolForm.querySelectorAll('.translation-container');
+        translationContainers.forEach(container => {
+            const translatedPrompt = container.querySelector('.translated-prompt');
+            if (translatedPrompt) {
+                translatedPrompt.value = '';
+            }
+            // 隐藏翻译容器
+            container.style.display = 'none';
+        });
+        
+        // 3. 清空图片预览区域
+        const previewAreas = toolForm.querySelectorAll('.image-preview-area');
+        previewAreas.forEach(preview => {
+            preview.style.display = 'none';
+            preview.innerHTML = '';
+        });
+        
+        // 4. 显示所有拖拽区域，隐藏清空按钮
+        const dropZones = toolForm.querySelectorAll('.drop-zone');
+        const clearButtons = toolForm.querySelectorAll('.clear-image-btn');
+        
+        dropZones.forEach(dropZone => {
+            dropZone.style.display = 'block';
+            dropZone.innerHTML = `
+                <div class="drop-icon">📁</div>
+                <div class="drop-text">拖拽图片文件到此处或点击选择</div>
+            `;
+            dropZone.style.color = 'var(--secondary-text)';
+        });
+        
+        clearButtons.forEach(btn => {
+            btn.style.display = 'none';
+        });
+        
+        // 5. 清空动态图片区域（仅限 NanoBananaGenOR compose 模式）
+        if (toolName === 'NanoBananaGenOR') {
+            const dynamicContainer = toolForm.querySelector('.dynamic-images-container');
+            if (dynamicContainer) {
+                const imagesList = dynamicContainer.querySelector('.sortable-images-list');
+                if (imagesList) {
+                    // 清空所有动态添加的图片
+                    const dynamicItems = imagesList.querySelectorAll('.dynamic-image-item');
+                    dynamicItems.forEach(item => {
+                        item.remove();
+                    });
+                }
+            }
+        }
+        
+        // 6. 清空结果容器
+        if (resultContainer) {
+            resultContainer.innerHTML = '';
+        }
+        
+        // 7. 显示成功提示
+        const successMessage = document.createElement('div');
+        successMessage.className = 'success-notification';
+        successMessage.style.cssText = `
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: var(--success-color);
+            color: white;
+            padding: 12px 20px;
+            border-radius: 6px;
+            z-index: 1000;
+            font-size: 14px;
+            font-weight: 500;
+            box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+        `;
+        successMessage.textContent = '✓ 已清空所有内容';
+        document.body.appendChild(successMessage);
+        
+        // 3秒后移除提示
+        setTimeout(() => {
+            if (successMessage.parentNode) {
+                successMessage.classList.add('removing');
+                setTimeout(() => {
+                    if (successMessage.parentNode) {
+                        successMessage.parentNode.removeChild(successMessage);
+                    }
+                }, 300);
+            }
+        }, 2700);
+    }
+
+    // 显示文件名设置对话框
+    function showFilenameSettings() {
+        const overlay = document.createElement('div');
+        overlay.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 10000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        `;
+        
+        const dialog = document.createElement('div');
+        dialog.style.cssText = `
+            background: var(--card-bg);
+            border-radius: 8px;
+            padding: 30px;
+            max-width: 400px;
+            width: 90%;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--border-color);
+        `;
+        
+        dialog.innerHTML = `
+            <h3 style="margin: 0 0 20px 0; color: var(--primary-text); text-align: center;">文件名显示设置</h3>
+            <div style="margin-bottom: 20px;">
+                <label style="display: block; margin-bottom: 8px; color: var(--secondary-text); font-weight: bold;">
+                    文件名最大长度（超过则省略）：
+                </label>
+                <input type="number" id="filename-length-input" 
+                    value="${MAX_FILENAME_LENGTH}" 
+                    min="50" 
+                    max="1000" 
+                    style="
+                        width: 100%;
+                        padding: 10px;
+                        border: 1px solid var(--border-color);
+                        border-radius: 4px;
+                        background: var(--input-bg);
+                        color: var(--primary-text);
+                        font-size: 14px;
+                        box-sizing: border-box;
+                    "
+                >
+                <div style="font-size: 12px; color: var(--secondary-text); margin-top: 5px;">
+                    建议范围：50-1000 字符，默认为 400
+                </div>
+            </div>
+            <div style="display: flex; gap: 10px; justify-content: flex-end;">
+                <button id="cancel-btn" style="
+                    background: var(--secondary-color, #6b7280);
+                    color: white;
+                    border: none;
+                    padding: 10px 20px;
+                    border-radius: 4px;
+                    cursor: pointer;
+                ">取消</button>
+                <button id="save-btn" style="
+                    background: var(--primary-color);
+                    color: white;
+                    border: none;
+                    padding: 10px 20px;
+                    border-radius: 4px;
+                    cursor: pointer;
+                ">保存</button>
+            </div>
+        `;
+        
+        const input = dialog.querySelector('#filename-length-input');
+        const cancelBtn = dialog.querySelector('#cancel-btn');
+        const saveBtn = dialog.querySelector('#save-btn');
+        
+        cancelBtn.addEventListener('click', () => {
+            document.body.removeChild(overlay);
+        });
+        
+        saveBtn.addEventListener('click', () => {
+            const newLength = parseInt(input.value, 10);
+            if (newLength >= 50 && newLength <= 1000) {
+                MAX_FILENAME_LENGTH = newLength;
+                settings.maxFilenameLength = newLength;
+                saveSettings();
+                
+                // 显示成功提示
+                const successMsg = document.createElement('div');
+                successMsg.className = 'success-notification';
+                successMsg.style.cssText = `
+                    position: fixed;
+                    top: 20px;
+                    right: 20px;
+                    background: var(--success-color);
+                    color: white;
+                    padding: 12px 20px;
+                    border-radius: 6px;
+                    z-index: 10001;
+                    font-size: 14px;
+                    font-weight: 500;
+                `;
+                successMsg.textContent = '✓ 设置已保存';
+                document.body.appendChild(successMsg);
+                
+                setTimeout(() => {
+                    if (successMsg.parentNode) {
+                        successMsg.parentNode.removeChild(successMsg);
+                    }
+                }, 2000);
+                
+                document.body.removeChild(overlay);
+            } else {
+                alert('请输入 50-1000 之间的数值');
+            }
+        });
+        
+        overlay.appendChild(dialog);
+        document.body.appendChild(overlay);
+        
+        // 点击背景关闭
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) {
+                document.body.removeChild(overlay);
+            }
+        });
+    }
+
+    // 设置空区域拖拽上传功能
+    function setupEmptyAreaDragDrop(container) {
+        let dragCounter = 0;
+        
+        container.addEventListener('dragenter', (e) => {
+            // 只处理文件拖拽，不处理元素拖拽
+            if (e.dataTransfer.types.includes('Files')) {
+                e.preventDefault();
+                dragCounter++;
+                
+                // 检查是否拖拽到已有的图片输入框上
+                const targetImageItem = e.target.closest('.dynamic-image-item');
+                if (targetImageItem) {
+                    // 如果拖拽到已有项目上，不执行空区域逻辑
+                    return;
+                }
+                
+                // 如果是空列表，显示拖拽提示
+                if (container.children.length === 0) {
+                    container.style.borderStyle = 'dashed';
+                    container.style.borderColor = 'var(--primary-color)';
+                    container.style.backgroundColor = 'rgba(59, 130, 246, 0.1)';
+                    
+                    if (!container.querySelector('.empty-drop-hint')) {
+                        const hint = document.createElement('div');
+                        hint.className = 'empty-drop-hint';
+                        hint.style.cssText = `
+                            text-align: center;
+                            padding: 40px 20px;
+                            color: var(--primary-color);
+                            font-size: 16px;
+                            font-weight: bold;
+                            pointer-events: none;
+                        `;
+                        hint.innerHTML = `
+                            📁 拖拽图片到此处添加<br>
+                            <span style="font-size: 14px; font-weight: normal;">将自动作为额外图片添加</span>
+                        `;
+                        container.appendChild(hint);
+                    }
+                }
+            }
+        });
+        
+        container.addEventListener('dragleave', (e) => {
+            if (e.dataTransfer.types.includes('Files')) {
+                // 检查是否拖拽到已有的图片输入框上
+                const targetImageItem = e.target.closest('.dynamic-image-item');
+                if (targetImageItem) {
+                    return;
+                }
+                
+                dragCounter--;
+                
+                if (dragCounter === 0) {
+                    container.style.borderStyle = '';
+                    container.style.borderColor = '';
+                    container.style.backgroundColor = '';
+                    
+                    const hint = container.querySelector('.empty-drop-hint');
+                    if (hint) {
+                        hint.remove();
+                    }
+                }
+            }
+        });
+        
+        container.addEventListener('dragover', (e) => {
+            if (e.dataTransfer.types.includes('Files')) {
+                // 检查是否拖拽到已有的图片输入框上
+                const targetImageItem = e.target.closest('.dynamic-image-item');
+                if (targetImageItem) {
+                    return; // 让已有项目自己处理拖拽
+                }
+                
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'copy';
+            }
+        });
+        
+        container.addEventListener('drop', (e) => {
+            if (e.dataTransfer.types.includes('Files')) {
+                // 检查是否拖拽到已有的图片输入框上
+                const targetImageItem = e.target.closest('.dynamic-image-item');
+                if (targetImageItem) {
+                    return; // 让已有项目自己处理拖拽，不在这里创建新项目
+                }
+                
+                e.preventDefault();
+                dragCounter = 0;
+                
+                const files = Array.from(e.dataTransfer.files).filter(file => file.type.startsWith('image/'));
+                if (files.length > 0) {
+                    // 清理拖拽状态
+                    container.style.borderStyle = '';
+                    container.style.borderColor = '';
+                    container.style.backgroundColor = '';
+                    
+                    const hint = container.querySelector('.empty-drop-hint');
+                    if (hint) {
+                        hint.remove();
+                    }
+                    
+                    // 为每个文件创建新的图片输入框
+                    files.forEach((file, index) => {
+                        const nextIndex = getNextAvailableImageIndex(container);
+                        const newItem = addDynamicImageInput(container, nextIndex);
+                        
+                        // 等待元素添加到 DOM 后再处理文件
+                        setTimeout(() => {
+                            const textInput = newItem.querySelector('input[type="text"]');
+                            const dropZone = newItem.querySelector('.drop-zone');
+                            const previewArea = newItem.querySelector('.image-preview-area');
+                            const clearButton = newItem.querySelector('.clear-image-btn');
+                            
+                            if (textInput && dropZone && previewArea && clearButton) {
+                                handleImageFile(file, textInput, dropZone, previewArea, clearButton);
+                            }
+                        }, 100);
+                    });
+                }
+            }
+        });
+    }
+
+    // 创建拖拽上传图片输入框
+    function createDragDropImageInput(param) {
+        const container = document.createElement('div');
+        container.className = 'dragdrop-image-container';
+        container.style.cssText = `
+            position: relative;
+            border: 2px dashed var(--border-color);
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            background: var(--input-bg);
+            transition: all 0.3s ease;
+            min-height: 120px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+        `;
+
+        const textInput = document.createElement('input');
+        textInput.type = 'text';
+        textInput.name = param.name;
+        textInput.placeholder = param.placeholder || '';
+        textInput.style.cssText = `
+            width: 100%;
+            margin-bottom: 10px;
+            padding: 8px;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            background: var(--input-bg);
+            color: var(--text-color);
+        `;
+        if (param.required) textInput.required = true;
+
+        const contentArea = document.createElement('div');
+        contentArea.className = 'upload-content-area';
+        contentArea.style.cssText = 'width: 100%; display: flex; flex-direction: column; align-items: center;';
+
+        const dropZone = document.createElement('div');
+        dropZone.className = 'drop-zone';
+        dropZone.innerHTML = `
+            <div class="drop-icon">📁</div>
+            <div class="drop-text">拖拽图片文件到此处或点击选择</div>
+        `;
+        dropZone.style.cssText = `
+            cursor: pointer;
+            color: var(--secondary-text);
+            font-size: 14px;
+            padding: 20px;
+            width: 100%;
+            box-sizing: border-box;
+        `;
+
+        const previewArea = document.createElement('div');
+        previewArea.className = 'image-preview-area';
+        previewArea.style.cssText = `
+            display: none;
+            width: 100%;
+            max-width: 300px;
+            margin-top: 10px;
+            text-align: center;
+        `;
+
+        const clearButton = document.createElement('button');
+        clearButton.type = 'button';
+        clearButton.innerHTML = '🗑️ 清空';
+        clearButton.className = 'clear-image-btn';
+        clearButton.style.cssText = `
+            display: none;
+            background: var(--danger-color);
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            margin: 0 auto;
+            transition: all 0.2s ease;
+        `;
+
+        // 文件选择输入
+        const fileInput = document.createElement('input');
+        fileInput.type = 'file';
+        fileInput.accept = 'image/*';
+        fileInput.style.display = 'none';
+
+        // 点击选择文件
+        dropZone.addEventListener('click', () => {
+            fileInput.click();
+        });
+
+        // 清空按钮事件
+        clearButton.addEventListener('click', () => {
+            clearImageInput(textInput, dropZone, previewArea, clearButton);
+        });
+
+        // 文件选择处理
+        fileInput.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                handleImageFile(file, textInput, dropZone, previewArea, clearButton);
+            }
+        });
+
+        // 拖拽事件处理
+        container.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            container.style.borderColor = 'var(--primary-color)';
+            container.style.background = 'var(--primary-color-alpha)';
+        });
+
+        container.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            container.style.borderColor = 'var(--border-color)';
+            container.style.background = 'var(--input-bg)';
+        });
+
+        container.addEventListener('drop', (e) => {
+            e.preventDefault();
+            container.style.borderColor = 'var(--border-color)';
+            container.style.background = 'var(--input-bg)';
+            
+            const files = Array.from(e.dataTransfer.files).filter(file => file.type.startsWith('image/'));
+            if (files.length > 0) {
+                handleImageFile(files[0], textInput, dropZone, previewArea, clearButton);
+            }
+        });
+
+        contentArea.appendChild(dropZone);
+        contentArea.appendChild(previewArea);
+        contentArea.appendChild(clearButton);
+        
+        container.appendChild(textInput);
+        container.appendChild(contentArea);
+        container.appendChild(fileInput);
+
+        return container;
+    }
+
+    // 处理图片文件
+    function handleImageFile(file, textInput, dropZone, previewArea, clearButton) {
+        if (!file) {
+            console.error('没有提供文件对象。');
+            return;
+        }
+
+        // 1. 显示加载状态
+        dropZone.style.display = 'none';
+        previewArea.style.display = 'block';
+        clearButton.style.display = 'none';
+        previewArea.innerHTML = `
+            <div class="loading-spinner-container" style="display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--secondary-text); padding: 20px;">
+                <div class="loading-spinner" style="border: 4px solid rgba(255, 255, 255, 0.3); border-radius: 50%; border-top-color: var(--primary-color); width: 30px; height: 30px; animation: spin 1s linear infinite; margin-bottom: 10px;"></div>
+                <span>正在读取文件...</span>
+            </div>
+        `;
+        
+        const reader = new FileReader();
+        reader.onload = function(e) {
+            const dataUrl = e.target.result;
+
+            // 2. 存储完整 Data URL 到隐藏属性
+            textInput.dataset.fullValue = dataUrl;
+
+            // 3. 创建用于 UI 显示的截断值
+            const sizeInBytes = file.size;
+            const sizeInKB = (sizeInBytes / 1024).toFixed(1);
+            const sizeInMB = (sizeInBytes / 1024 / 1024).toFixed(2);
+            const displaySize = sizeInBytes > 1024 * 512 ? `${sizeInMB} MB` : `${sizeInKB} KB`;
+            const truncatedBase64 = dataUrl.substring(0, 40);
+            const displayValue = `${truncatedBase64}... [${displaySize}]`;
+            textInput.value = displayValue;
+            
+            // 4. 更新预览
+            let displayName = file.name;
+            if (file.name.length > MAX_FILENAME_LENGTH) {
+                const extension = file.name.split('.').pop();
+                const nameWithoutExt = file.name.substring(0, file.name.lastIndexOf('.'));
+                const truncatedName = nameWithoutExt.substring(0, MAX_FILENAME_LENGTH - extension.length - 4) + '...';
+                displayName = truncatedName + '.' + extension;
+            }
+            previewArea.innerHTML = `
+                <img src="${dataUrl}" style="max-width: 100%; max-height: 150px; border-radius: 6px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 8px; display: block; margin-left: auto; margin-right: auto;" alt="Preview">
+                <div class="file-name" style="font-size: 12px; color: var(--secondary-text); word-wrap: break-word; word-break: break-all; line-height: 1.4; max-width: 100%; text-align: center; padding: 0 10px; font-family: monospace;">${displayName}</div>
+            `;
+            clearButton.style.display = 'inline-block';
+        };
+
+        reader.onerror = function(error) {
+            console.error('FileReader 读取文件失败:', error);
+            previewArea.innerHTML = `<div class="error-message" style="color: var(--danger-color); padding: 20px;">错误: 无法读取文件。</div>`;
+            setTimeout(() => {
+                clearImageInput(textInput, dropZone, previewArea, clearButton);
+            }, 3000);
+        };
+
+        reader.readAsDataURL(file);
+    }
+
+    // 清空图片输入
+    function clearImageInput(textInput, dropZone, previewArea, clearButton) {
+        textInput.value = '';
+        dropZone.style.display = 'block';
+        previewArea.style.display = 'none';
+        clearButton.style.display = 'none';
+        
+        // 重置拖拽区域内容
+        dropZone.innerHTML = `
+            <div class="drop-icon">📁</div>
+            <div class="drop-text">拖拽图片文件到此处或点击选择</div>
+        `;
+        dropZone.style.color = 'var(--secondary-text)';
+    }
+
+    // 创建动态图片管理容器
+    function createDynamicImageContainer(container) {
+        const dynamicContainer = document.createElement('div');
+        dynamicContainer.className = 'dynamic-images-container';
+        dynamicContainer.innerHTML = `
+            <div class="dynamic-images-header">
+                <h4>额外图片</h4>
+                <button type="button" class="add-image-btn">➕ 添加图片</button>
+            </div>
+            <div class="sortable-images-list" id="sortable-images-list"></div>
+        `;
+        
+        dynamicContainer.style.cssText = `
+            margin-top: 20px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 15px;
+            background: var(--card-bg);
+        `;
+
+        const addButton = dynamicContainer.querySelector('.add-image-btn');
+        const imagesList = dynamicContainer.querySelector('.sortable-images-list');
+        let imageCounter = 2; // 从 image_url_2 开始
+
+        addButton.style.cssText = `
+            background: var(--primary-color);
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        `;
+
+        addButton.addEventListener('click', () => {
+            const nextIndex = getNextAvailableImageIndex(imagesList);
+            addDynamicImageInput(imagesList, nextIndex);
+        });
+
+        // 初始化拖拽排序
+        makeSortable(imagesList);
+        
+        // 添加空区域拖拽上传功能
+        setupEmptyAreaDragDrop(imagesList);
+        
+        container.appendChild(dynamicContainer);
+    }
+
+    // 获取下一个可用的图片索引
+    function getNextAvailableImageIndex(container) {
+        const existingItems = container.querySelectorAll('.dynamic-image-item');
+        const usedIndices = Array.from(existingItems).map(item => {
+            return parseInt(item.dataset.index, 10);
+        }).filter(index => !isNaN(index));
+        
+        // 从 2 开始查找第一个未使用的索引
+        for (let i = 2; i <= usedIndices.length + 2; i++) {
+            if (!usedIndices.includes(i)) {
+                return i;
+            }
+        }
+        
+        // 如果所有索引都被使用，返回下一个
+        return Math.max(...usedIndices, 1) + 1;
+    }
+
+    // 添加动态图片输入框
+    function addDynamicImageInput(container, index) {
+        const imageItem = document.createElement('div');
+        imageItem.className = 'dynamic-image-item';
+        imageItem.dataset.index = index;
+        imageItem.style.cssText = `
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            margin-bottom: 15px;
+            padding: 10px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            background: var(--input-bg);
+        `;
+
+        const dragHandle = document.createElement('div');
+        dragHandle.className = 'drag-handle';
+        dragHandle.innerHTML = '☰';
+        dragHandle.draggable = false; // 手柄本身不可拖拽
+        dragHandle.style.cssText = `
+            cursor: move;
+            color: var(--secondary-text);
+            font-size: 18px;
+            padding: 5px;
+            user-select: none;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 30px;
+        `;
+
+        const inputContainer = document.createElement('div');
+        inputContainer.style.cssText = 'flex: 1;';
+        
+        const label = document.createElement('label');
+        label.textContent = `图片 ${index}`;
+        label.style.cssText = `
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        `;
+
+        const dragDropInput = createDragDropImageInput({
+            name: `image_url_${index}`,
+            placeholder: `第${index}张图片的URL或拖拽图片文件到此处`,
+            required: false
+        });
+
+        const removeButton = document.createElement('button');
+        removeButton.type = 'button';
+        removeButton.innerHTML = '❌';
+        removeButton.className = 'remove-image-btn';
+        removeButton.style.cssText = `
+            background: var(--danger-color);
+            color: white;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            align-self: flex-start;
+            margin-top: 5px;
+            transition: all 0.2s ease;
+        `;
+
+        removeButton.addEventListener('click', () => {
+            imageItem.remove();
+            // 删除后重新编排所有图片的编号
+            updateImageIndicesAfterSort(container);
+        });
+
+        inputContainer.appendChild(label);
+        inputContainer.appendChild(dragDropInput);
+        imageItem.appendChild(dragHandle);
+        imageItem.appendChild(inputContainer);
+        imageItem.appendChild(removeButton);
+        
+        container.appendChild(imageItem);
+        
+        return imageItem; // 返回创建的元素，供外部使用
+    }
+
+    // 更新图片索引
+    function updateImageIndices(container) {
+        const items = container.querySelectorAll('.dynamic-image-item');
+        items.forEach((item, index) => {
+            const newIndex = index + 2; // 从 image_url_2 开始
+            item.dataset.index = newIndex;
+            
+            const label = item.querySelector('label');
+            label.textContent = `图片 ${newIndex}`;
+            
+            const input = item.querySelector('input[type="text"]');
+            input.name = `image_url_${newIndex}`;
+            
+            const placeholder = `第${newIndex}张图片的URL或拖拽图片文件到此处`;
+            input.placeholder = placeholder;
+        });
+    }
+
+    // 实现拖拽排序功能（重新设计，避免与拖拽上传冲突）
+    function makeSortable(container) {
+        let draggedElement = null;
+        let isDraggingForSort = false;
+        let startY = 0;
+        let startX = 0;
+        const threshold = 5; // 拖拽阀值，超过这个距离才认为是排序拖拽
+
+        // 使用鼠标事件而不是 HTML5 拖拽 API，避免冲突
+        container.addEventListener('mousedown', (e) => {
+            const dragHandle = e.target.closest('.drag-handle');
+            if (dragHandle && e.button === 0) { // 只处理左键
+                e.preventDefault();
+                draggedElement = dragHandle.closest('.dynamic-image-item');
+                if (draggedElement) {
+                    startY = e.clientY;
+                    startX = e.clientX;
+                    isDraggingForSort = false;
+                    
+                    // 添加全局事件监听
+                    document.addEventListener('mousemove', handleMouseMove);
+                    document.addEventListener('mouseup', handleMouseUp);
+                    
+                    // 禁止选中文本
+                    document.body.style.userSelect = 'none';
+                }
+            }
+        });
+
+        function handleMouseMove(e) {
+            if (!draggedElement) return;
+            
+            const deltaY = Math.abs(e.clientY - startY);
+            const deltaX = Math.abs(e.clientX - startX);
+            
+            // 只有当鼠标移动超过阀值时才开始拖拽排序
+            if (!isDraggingForSort && (deltaY > threshold || deltaX > threshold)) {
+                isDraggingForSort = true;
+                
+                // 增强拖拽元素的视觉效果
+                draggedElement.style.opacity = '0.8';
+                draggedElement.style.transform = 'rotate(2deg) scale(1.02)';
+                draggedElement.style.zIndex = '1000';
+                draggedElement.style.boxShadow = '0 8px 32px rgba(59, 130, 246, 0.3), 0 0 0 2px rgba(59, 130, 246, 0.5)';
+                draggedElement.style.borderRadius = '8px';
+                draggedElement.classList.add('dragging');
+                
+                // 创建一个可视化的拖拽指示器
+                const indicator = document.createElement('div');
+                indicator.className = 'drag-indicator';
+                indicator.style.cssText = `
+                    position: absolute;
+                    background: linear-gradient(90deg, 
+                        transparent 0%, 
+                        rgba(59, 130, 246, 0.8) 20%, 
+                        rgba(59, 130, 246, 1) 50%, 
+                        rgba(59, 130, 246, 0.8) 80%, 
+                        transparent 100%);
+                    border-radius: 2px;
+                    z-index: 1001;
+                    transition: all 0.2s ease;
+                    pointer-events: none;
+                    animation: dragPulse 1.5s ease-in-out infinite;
+                `;
+                container.appendChild(indicator);
+            }
+            
+            if (isDraggingForSort) {
+                // 更新拖拽指示器位置
+                const indicator = container.querySelector('.drag-indicator');
+                const afterElement = getDragAfterElement(container, e.clientY);
+                
+                // 清除之前的高亮效果
+                container.querySelectorAll('.dynamic-image-item').forEach(item => {
+                    if (item !== draggedElement) {
+                        item.classList.remove('drag-target-hover');
+                    }
+                });
+                
+                if (afterElement) {
+                    const rect = afterElement.getBoundingClientRect();
+                    const containerRect = container.getBoundingClientRect();
+                    indicator.style.top = (rect.top - containerRect.top - 2) + 'px';
+                    indicator.style.left = '10px';
+                    indicator.style.width = 'calc(100% - 20px)';
+                    indicator.style.height = '4px';
+                    
+                    // 高亮目标元素
+                    afterElement.classList.add('drag-target-hover');
+                } else {
+                    // 在最后一个元素之后
+                    const lastItem = container.querySelector('.dynamic-image-item:last-child');
+                    if (lastItem && lastItem !== draggedElement) {
+                        const rect = lastItem.getBoundingClientRect();
+                        const containerRect = container.getBoundingClientRect();
+                        indicator.style.top = (rect.bottom - containerRect.top + 2) + 'px';
+                        indicator.style.left = '10px';
+                        indicator.style.width = 'calc(100% - 20px)';
+                        indicator.style.height = '4px';
+                        
+                        // 高亮最后一个元素
+                        lastItem.classList.add('drag-target-hover');
+                    }
+                }
+            }
+        }
+
+        function handleMouseUp(e) {
+            if (draggedElement && isDraggingForSort) {
+                // 执行拖拽排序
+                const afterElement = getDragAfterElement(container, e.clientY);
+                if (afterElement) {
+                    container.insertBefore(draggedElement, afterElement);
+                } else {
+                    container.appendChild(draggedElement);
+                }
+                
+                // 更新序号
+                updateImageIndicesAfterSort(container);
+            }
+            
+            // 清理
+            if (draggedElement) {
+                draggedElement.style.opacity = '';
+                draggedElement.style.transform = '';
+                draggedElement.style.zIndex = '';
+                draggedElement.style.boxShadow = '';
+                draggedElement.style.borderRadius = '';
+                draggedElement.classList.remove('dragging');
+            }
+            
+            // 清除所有高亮效果
+            container.querySelectorAll('.dynamic-image-item').forEach(item => {
+                item.classList.remove('drag-target-hover');
+            });
+            
+            const indicator = container.querySelector('.drag-indicator');
+            if (indicator) {
+                indicator.remove();
+            }
+            
+            draggedElement = null;
+            isDraggingForSort = false;
+            document.body.style.userSelect = '';
+            
+            // 移除全局事件监听
+            document.removeEventListener('mousemove', handleMouseMove);
+            document.removeEventListener('mouseup', handleMouseUp);
+        }
+
+        // 为新添加的元素设置样式
+        const observer = new MutationObserver((mutations) => {
+            mutations.forEach((mutation) => {
+                mutation.addedNodes.forEach((node) => {
+                    if (node.nodeType === 1 && node.classList.contains('dynamic-image-item')) {
+                        const dragHandle = node.querySelector('.drag-handle');
+                        if (dragHandle) {
+                            dragHandle.style.cursor = 'move';
+                            dragHandle.title = '拖拽调整顺序';
+                        }
+                    }
+                });
+            });
+        });
+        
+        observer.observe(container, { childList: true });
+    }
+
+    // 拖拽排序后更新图片序号
+    function updateImageIndicesAfterSort(container) {
+        const items = container.querySelectorAll('.dynamic-image-item');
+        items.forEach((item, index) => {
+            const newIndex = index + 2; // 从 image_url_2 开始
+            item.dataset.index = newIndex;
+            
+            const label = item.querySelector('label');
+            label.textContent = `图片 ${newIndex}`;
+            
+            const input = item.querySelector('input[type="text"]');
+            input.name = `image_url_${newIndex}`;
+            
+            const placeholder = `第${newIndex}张图片的URL或拖拽图片文件到此处`;
+            input.placeholder = placeholder;
+            
+            // 更新拖拽输入框内的占位符
+            const dragDropContainer = item.querySelector('.dragdrop-image-container');
+            if (dragDropContainer) {
+                const textInput = dragDropContainer.querySelector('input[type="text"]');
+                if (textInput) {
+                    textInput.name = `image_url_${newIndex}`;
+                    textInput.placeholder = placeholder;
+                }
+            }
+        });
+    }
+
+    // 获取拖拽后的位置
+    function getDragAfterElement(container, y) {
+        const draggableElements = [...container.querySelectorAll('.dynamic-image-item:not(.dragging)')];
+        
+        return draggableElements.reduce((closest, child) => {
+            const box = child.getBoundingClientRect();
+            const offset = y - box.top - box.height / 2;
+            
+            if (offset < 0 && offset > closest.offset) {
+                return { offset: offset, element: child };
+            } else {
+                return closest;
+            }
+        }, { offset: Number.NEGATIVE_INFINITY }).element;
     }
 
     async function executeTool(toolName) {
         const formData = new FormData(toolForm);
         const args = {};
 
-        // Collect all form data
+        // 收集表单数据, 特别处理图片输入
         for (let [key, value] of formData.entries()) {
             const inputElement = toolForm.querySelector(`[name="${key}"]`);
-            if (inputElement && inputElement.type === 'checkbox') {
-                args[key] = inputElement.checked;
-            } else if (value) { // Don't include empty optional fields
-                args[key] = value;
+            if (inputElement) {
+                if (inputElement.type === 'checkbox') {
+                    args[key] = inputElement.checked;
+                } else if (inputElement.dataset.fullValue) { // 检查是否存在完整的 Base64 值
+                    args[key] = inputElement.dataset.fullValue;
+                } else if (value) {
+                    args[key] = value;
+                }
             }
         }
-        // Handle radio groups correctly
+        
+        // 正确处理 radio group
         const radioGroups = toolForm.querySelectorAll('.radio-group');
         radioGroups.forEach(group => {
             const selected = group.querySelector('input:checked');
@@ -430,46 +1785,36 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
 
-        // Build the plain text request body
-        let requestBody = `<<<[TOOL_REQUEST]>>>\n`;
-        requestBody += `maid:「始」${USER_NAME}「末」,\n`;
-        requestBody += `tool_name:「始」${toolName}「末」,\n`;
-        for (const key in args) {
-            if (args[key] !== undefined) {
-                const value = typeof args[key] === 'boolean' ? String(args[key]) : args[key];
-                requestBody += `${key}:「始」${value}「末」,\n`;
-            }
-        }
-        requestBody += `<<<[END_TOOL_REQUEST]>>>`;
-
-        resultContainer.innerHTML = '<div class="loading">正在执行...</div>';
-
-        try {
-            const response = await fetch(VCP_SERVER_URL, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'text/plain;charset=UTF-8',
-                    'Authorization': `Bearer ${VCP_API_KEY}`
-                },
-                body: requestBody // Send the plain text body
-            });
-
-            const responseText = await response.text();
-            if (!response.ok) {
-                // Try to parse error JSON if possible, otherwise use the raw text
-                try {
-                    const errorJson = JSON.parse(responseText);
-                    throw new Error(`HTTP ${response.status}: ${errorJson.error || responseText}`);
-                } catch (e) {
-                    throw new Error(`HTTP ${response.status}: ${responseText}`);
+        // 处理翻译
+        if (toolName === 'NanoBananaGenOR') {
+            if (args['enable_translation']) {
+                const translatedPrompt = toolForm.querySelector('.translated-prompt');
+                if (translatedPrompt && translatedPrompt.value.trim()) {
+                    args.prompt = translatedPrompt.value.trim();
                 }
             }
+        }
+        
+        resultContainer.innerHTML = '<div class="loading">正在执行... (通过主进程代理)</div>';
 
-            const data = JSON.parse(responseText); // The response is JSON
-            renderResult(data, toolName);
+        try {
+            // 通过 IPC 将整个请求交由主进程处理
+            const result = await ipcRenderer.invoke('vcp-ht-execute-tool-proxy', {
+                url: VCP_SERVER_URL,
+                apiKey: VCP_API_KEY,
+                toolName: toolName,
+                userName: USER_NAME,
+                args: args
+            });
+
+            if (result.success) {
+                renderResult(result.data, toolName);
+            } else {
+                throw new Error(result.error);
+            }
 
         } catch (error) {
-            console.error('Error executing tool:', error);
+            console.error('Error executing tool via proxy:', error);
             resultContainer.innerHTML = `<div class="error">执行出错: ${error.message}</div>`;
         }
     }
@@ -767,6 +2112,31 @@ document.addEventListener('DOMContentLoaded', () => {
             workflowBtn.addEventListener('click', openWorkflowEditor);
         }
 
+        // 添加设置按钮到标题区域
+        const settingsButton = document.createElement('button');
+        settingsButton.innerHTML = '⚙️ 设置';
+        settingsButton.className = 'settings-btn';
+        settingsButton.style.cssText = `
+            position: fixed;
+            top: 60px;
+            right: 20px;
+            background: rgba(59, 130, 246, 0.8);
+            color: white;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+            z-index: 100;
+            backdrop-filter: blur(10px);
+        `;
+        
+        settingsButton.addEventListener('click', () => {
+            showFilenameSettings();
+        });
+        
+        document.body.appendChild(settingsButton);
+        
         renderToolGrid();
         loadAndProcessWallpaper(); // Process the wallpaper on startup
         setupImageViewer();
