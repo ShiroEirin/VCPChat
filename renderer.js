@@ -3,6 +3,7 @@ let globalSettings = {
     sidebarWidth: 260,
     notificationsSidebarWidth: 300,
     userName: '用户', // Default username
+    doNotDisturbLogMode: false, // 勿扰模式状态
 };
 // Unified selected item state
 let currentSelectedItem = {
@@ -73,6 +74,7 @@ const notificationsSidebar = document.getElementById('notificationsSidebar');
 const vcpLogConnectionStatusDiv = document.getElementById('vcpLogConnectionStatus');
 const notificationsListUl = document.getElementById('notificationsList');
 const clearNotificationsBtn = document.getElementById('clearNotificationsBtn');
+const doNotDisturbBtn = document.getElementById('doNotDisturbBtn');
 
 const sidebarTabButtons = document.querySelectorAll('.sidebar-tab-button');
 const sidebarTabContents = document.querySelectorAll('.sidebar-tab-content');
@@ -91,6 +93,7 @@ const maximizeBtn = document.getElementById('maximize-btn');
 const restoreBtn = document.getElementById('restore-btn');
 const closeBtn = document.getElementById('close-btn');
 const settingsBtn = document.getElementById('settings-btn'); // DevTools button
+const minimizeToTrayBtn = document.getElementById('minimize-to-tray-btn');
 const agentSearchInput = document.getElementById('agentSearchInput');
 
 let croppedAgentAvatarFile = null; // For agent avatar
@@ -484,15 +487,16 @@ import * as interruptHandler from './modules/interruptHandler.js';
         console.log(`[Renderer] Received topic update for group ${groupId}, topic ${topicId}: "${newTitle}"`);
         if (currentSelectedItem.id === groupId && currentSelectedItem.type === 'group') {
             // Update the currentSelectedItem's config if it's the active group
-            if (currentSelectedItem.config && currentSelectedItem.config.topics) {
-                const topicIndex = currentSelectedItem.config.topics.findIndex(t => t.id === topicId);
+            const config = currentSelectedItem.config || currentSelectedItem;
+            if (config && config.topics) {
+                const topicIndex = config.topics.findIndex(t => t.id === topicId);
                 if (topicIndex !== -1) {
-                    currentSelectedItem.config.topics[topicIndex].name = newTitle;
+                    config.topics[topicIndex].name = newTitle;
                 } else { // Topic might be new or ID changed, replace topics array
-                    currentSelectedItem.config.topics = topics;
+                    config.topics = topics;
                 }
-            } else if (currentSelectedItem.config) {
-                currentSelectedItem.config.topics = topics;
+            } else if (config) {
+                config.topics = topics;
             }
 
 
@@ -522,7 +526,13 @@ import * as interruptHandler from './modules/interruptHandler.js';
             },
             uiHelper: uiHelperFunctions,
             mainRendererFunctions: {
-                updateCurrentItemConfig: (newConfig) => { currentSelectedItem.config = newConfig; },
+                updateCurrentItemConfig: (newConfig) => {
+                    if (currentSelectedItem.config) {
+                        currentSelectedItem.config = newConfig;
+                    } else {
+                        Object.assign(currentSelectedItem, newConfig);
+                    }
+                },
                 handleTopicDeletion: (remainingTopics) => {
                     if (window.chatManager) {
                         return window.chatManager.handleTopicDeletion(remainingTopics);
@@ -694,9 +704,7 @@ import * as interruptHandler from './modules/interruptHandler.js';
             console.error('[RENDERER_INIT] searchManager module not found!');
         }
 
-       // Initialize the emoticon URL fixer
-       initializeEmoticonFixer(window.electronAPI);
-
+       // Emoticon URL fixer is now initialized within messageRenderer
     } catch (error) {
         console.error('Error during DOMContentLoaded initialization:', error);
         chatMessagesDiv.innerHTML = `<div class="message-item system">初始化失败: ${error.message}</div>`;
@@ -993,6 +1001,21 @@ async function loadAndApplyGlobalSettings() {
         document.getElementById('agentMusicControl').checked = globalSettings.agentMusicControl === true;
         document.getElementById('enableVcpToolInjection').checked = globalSettings.enableVcpToolInjection === true;
 
+        // Load do not disturb mode setting (check both globalSettings and localStorage)
+        const doNotDisturbLogMode = globalSettings.doNotDisturbLogMode || (localStorage.getItem('doNotDisturbLogMode') === 'true');
+        if (doNotDisturbLogMode) {
+            doNotDisturbBtn.classList.add('active');
+            globalSettings.doNotDisturbLogMode = true;
+        } else {
+            doNotDisturbBtn.classList.remove('active');
+            globalSettings.doNotDisturbLogMode = false;
+        }
+
+        // Apply the theme mode from settings on startup
+        if (globalSettings.currentThemeMode && window.electronAPI) {
+            console.log(`[Renderer] Applying initial theme mode from settings: ${globalSettings.currentThemeMode}`);
+            window.electronAPI.setThemeMode(globalSettings.currentThemeMode);
+        }
 
     } else {
         console.warn('加载全局设置失败或无设置:', settings?.error);
@@ -1057,7 +1080,8 @@ function setupEventListeners() {
                     return;
                 }
                 // For http, https, file protocols, open externally
-                if (href.startsWith('http:') || href.startsWith('https:') || href.startsWith('file:')) {
+                // For http, https, file, magnet protocols, open externally
+                if (href.startsWith('http:') || href.startsWith('https:') || href.startsWith('file:') || href.startsWith('magnet:')) {
                     if (window.electronAPI && window.electronAPI.sendOpenExternalLink) {
                         window.electronAPI.sendOpenExternalLink(href);
                     } else {
@@ -1268,6 +1292,32 @@ function setupEventListeners() {
         notificationsListUl.innerHTML = '';
     });
 
+    if (doNotDisturbBtn) {
+        doNotDisturbBtn.addEventListener('click', async () => {
+            const isActive = doNotDisturbBtn.classList.toggle('active');
+            globalSettings.doNotDisturbLogMode = isActive;
+
+            // Also save to localStorage as backup
+            localStorage.setItem('doNotDisturbLogMode', isActive.toString());
+
+            // Save the setting immediately
+            const result = await window.electronAPI.saveSettings({
+                ...globalSettings, // Send all settings to avoid overwriting
+                doNotDisturbLogMode: isActive
+            });
+
+            if (result.success) {
+                uiHelperFunctions.showToastNotification(`勿扰模式已${isActive ? '开启' : '关闭'}`, 'info');
+            } else {
+                uiHelperFunctions.showToastNotification(`设置勿扰模式失败: ${result.error}`, 'error');
+                // Revert UI on failure
+                doNotDisturbBtn.classList.toggle('active', !isActive);
+                globalSettings.doNotDisturbLogMode = !isActive;
+                localStorage.setItem('doNotDisturbLogMode', (!isActive).toString());
+            }
+        });
+    }
+
 
     const openTranslatorBtn = document.getElementById('openTranslatorBtn');
     const openNotesBtn = document.getElementById('openNotesBtn');
@@ -1391,6 +1441,14 @@ function setupEventListeners() {
     if (agentSearchInput) {
         agentSearchInput.addEventListener('input', (e) => {
             filterAgentList(e.target.value);
+        });
+    }
+
+    if (minimizeToTrayBtn) {
+        minimizeToTrayBtn.addEventListener('click', () => {
+            // This will be handled by a function exposed on the electronAPI
+            // which in turn sends an IPC message to the main process.
+            window.electronAPI.minimizeToTray();
         });
     }
 }
@@ -1679,3 +1737,6 @@ async function handleConfirmForward() {
 window.getCroppedFile = getCroppedFile;
 window.setCroppedFile = setCroppedFile;
 window.ensureAudioContext = () => { /* Placeholder, will be defined in setupTtsListeners */ };
+
+// Make globalSettings accessible for notification renderer
+window.globalSettings = globalSettings;

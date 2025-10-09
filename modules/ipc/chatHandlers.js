@@ -142,7 +142,13 @@ function initialize(mainWindow, context) {
             const configPath = path.join(AGENT_DIR, agentId, 'config.json');
             if (!await fs.pathExists(configPath)) return { error: `保存话题标题失败: Agent ${agentId} 的配置文件不存在。` };
             
-            let config = await fs.readJson(configPath);
+            let config;
+            try {
+                config = await fs.readJson(configPath);
+            } catch (e) {
+                console.error(`读取Agent ${agentId} 配置文件失败 (save-agent-topic-title):`, e);
+                return { error: `读取配置文件失败: ${e.message}` };
+            }
             if (!config.topics || !Array.isArray(config.topics)) return { error: `保存话题标题失败: Agent ${agentId} 没有话题列表。` };
 
             const topicIndex = config.topics.findIndex(t => t.id === topicId);
@@ -239,8 +245,14 @@ function initialize(mainWindow, context) {
             const configPath = path.join(AGENT_DIR, agentId, 'config.json');
             if (!await fs.pathExists(configPath)) return { error: `Agent ${agentId} 的配置文件不存在。` };
             
-            const config = await fs.readJson(configPath);
-            if (!config.topics || !Array.isArray(config.topics)) config.topics = []; 
+            let config;
+            try {
+                config = await fs.readJson(configPath);
+            } catch (e) {
+                console.error(`读取Agent ${agentId} 配置文件失败 (create-new-topic-for-agent):`, e);
+                return { error: `读取配置文件失败: ${e.message}` };
+            }
+            if (!config.topics || !Array.isArray(config.topics)) config.topics = [];
 
             const newTopicId = `topic_${Date.now()}`;
             const newTopic = { id: newTopicId, name: topicName || `新话题 ${config.topics.length + 1}`, createdAt: Date.now() };
@@ -273,7 +285,13 @@ function initialize(mainWindow, context) {
             const configPath = path.join(AGENT_DIR, agentId, 'config.json');
             if (!await fs.pathExists(configPath)) return { error: `Agent ${agentId} 的配置文件不存在。` };
             
-            let config = await fs.readJson(configPath);
+            let config;
+            try {
+                config = await fs.readJson(configPath);
+            } catch (e) {
+                console.error(`读取Agent ${agentId} 配置文件失败 (delete-topic):`, e);
+                return { error: `读取配置文件失败: ${e.message}` };
+            }
             if (!config.topics || !Array.isArray(config.topics)) return { error: `Agent ${agentId} 没有话题列表可供删除。` };
 
             const initialTopicCount = config.topics.length;
@@ -584,14 +602,19 @@ ipcMain.handle('get-original-message-content', async (event, itemId, itemType, t
         try {
             // --- Agent Music Control Injection ---
             if (getMusicState) {
-                // Settings already loaded, just check the flag
                 try {
+                    const { musicWindow, currentSongInfo } = getMusicState();
+                    const topParts = [];
+                    const bottomParts = [];
+
+                    // 1. 始终注入当前播放的歌曲信息（如果存在）
+                    if (currentSongInfo) {
+                        bottomParts.push(`[当前播放音乐：${currentSongInfo.title} - ${currentSongInfo.artist} (${currentSongInfo.album || '未知专辑'})]`);
+                    }
+
+                    // 2. 如果启用了音乐控制，则注入播放列表和控制器
                     if (settings.agentMusicControl) {
-                        const { musicWindow, currentSongInfo } = getMusicState();
-                        const topParts = [];
-                        const bottomParts = [];
-    
-                        // 1. 构建播放列表信息 (注入到顶部)
+                        // 2a. 构建播放列表信息 (注入到顶部)
                         const songlistPath = path.join(APP_DATA_ROOT_IN_PROJECT, 'songlist.json');
                         if (await fs.pathExists(songlistPath)) {
                             const songlistJson = await fs.readJson(songlistPath);
@@ -602,37 +625,29 @@ ipcMain.handle('get-original-message-content', async (event, itemId, itemType, t
                                 }
                             }
                         }
-    
-                        // 2. 构建注入到底部的信息
-                        // 2a. 插件权限
+
+                        // 2b. 注入插件权限
                         bottomParts.push(`点歌台{{VCPMusicController}}`);
-    
-                        // 2b. 当前歌曲信息 (仅当播放器打开且有歌曲信息时)
-                        if (musicWindow && !musicWindow.isDestroyed() && currentSongInfo) {
-                            bottomParts.push(`[当前播放音乐：${currentSongInfo.title} - ${currentSongInfo.artist} (${currentSongInfo.album || '未知专辑'})]`);
+                    }
+
+                    // 3. 组合并注入到消息数组
+                    if (topParts.length > 0 || bottomParts.length > 0) {
+                        let systemMsgIndex = messages.findIndex(m => m.role === 'system');
+                        let originalContent = '';
+
+                        if (systemMsgIndex !== -1) {
+                            originalContent = messages[systemMsgIndex].content;
+                        } else {
+                            messages.unshift({ role: 'system', content: '' });
+                            systemMsgIndex = 0;
                         }
-    
-                        // 3. 组合并注入到消息数组
-                        if (topParts.length > 0 || bottomParts.length > 0) {
-                            let systemMsgIndex = messages.findIndex(m => m.role === 'system');
-                            let originalContent = '';
-    
-                            if (systemMsgIndex !== -1) {
-                                originalContent = messages[systemMsgIndex].content;
-                            } else {
-                                // 如果没有系统消息，则创建一个以便注入
-                                messages.unshift({ role: 'system', content: '' });
-                                systemMsgIndex = 0;
-                            }
-                            
-                            const finalParts = [];
-                            if (topParts.length > 0) finalParts.push(topParts.join('\n'));
-                            if (originalContent) finalParts.push(originalContent);
-                            if (bottomParts.length > 0) finalParts.push(bottomParts.join('\n'));
-    
-                            // 用换行符连接各个部分，确保格式正确
-                            messages[systemMsgIndex].content = finalParts.join('\n\n').trim();
-                        }
+                        
+                        const finalParts = [];
+                        if (topParts.length > 0) finalParts.push(topParts.join('\n'));
+                        if (originalContent) finalParts.push(originalContent);
+                        if (bottomParts.length > 0) finalParts.push(bottomParts.join('\n'));
+
+                        messages[systemMsgIndex].content = finalParts.join('\n\n').trim();
                     }
                 } catch (e) {
                     console.error('[Agent Music Control] Failed to inject music info:', e);
@@ -850,76 +865,6 @@ ipcMain.handle('get-original-message-content', async (event, itemId, itemType, t
         }
     });
 
-    ipcMain.on('send-voice-chat-message', async (event, { agentId, history, thinkingMessageId }) => {
-        const replyToWindow = BrowserWindow.fromWebContents(event.sender);
-        if (!replyToWindow || replyToWindow.isDestroyed()) {
-            console.error('Voice chat reply window is not available.');
-            return;
-        }
-
-        try {
-            const settingsPath = path.join(APP_DATA_ROOT_IN_PROJECT, 'settings.json');
-            const settings = await fs.readJson(settingsPath);
-
-            const agentConfigPath = path.join(AGENT_DIR, agentId, 'config.json');
-            if (!await fs.pathExists(agentConfigPath)) {
-                throw new Error(`Agent config for ${agentId} not found.`);
-            }
-            const agentConfig = await fs.readJson(agentConfigPath);
-
-            const voiceModePromptInjection = "\n\n当前处于语音模式中，你的回复应当口语化，内容简短直白。由于用户输入同样是语音识别模型构成，注意自主判断、理解其中的同音错别字或者错误语义识别。";
-            const systemPrompt = (agentConfig.systemPrompt || '').replace(/\{\{AgentName\}\}/g, agentConfig.name) + voiceModePromptInjection;
-
-            const messagesForVCP = [{ role: 'system', content: systemPrompt }];
-            const historyForVCP = history.map(msg => ({ role: msg.role, content: msg.content }));
-            messagesForVCP.push(...historyForVCP);
-
-            const modelConfig = {
-                model: agentConfig.model,
-                temperature: agentConfig.temperature,
-                stream: false, // Force non-streaming
-                max_tokens: agentConfig.maxOutputTokens,
-                top_p: agentConfig.top_p,
-                top_k: agentConfig.top_k
-            };
-
-            const response = await fetch(settings.vcpServerUrl, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${settings.vcpApiKey}`
-                },
-                body: JSON.stringify({
-                    messages: messagesForVCP,
-                    ...modelConfig
-                })
-            });
-
-            if (!response.ok) {
-                const errorText = await response.text();
-                throw new Error(`VCP server error: ${response.status} ${errorText}`);
-            }
-
-            const responseData = await response.json();
-            const fullText = responseData.choices?.[0]?.message?.content || '';
-
-            if (!replyToWindow.isDestroyed()) {
-                replyToWindow.webContents.send('voice-chat-reply', {
-                    thinkingMessageId,
-                    fullText
-                });
-            }
-
-        } catch (error) {
-            console.error('Error handling voice chat message:', error);
-            if (!replyToWindow.isDestroyed()) {
-                replyToWindow.webContents.send('voice-chat-reply', {
-                    thinkingMessageId,
-                    error: error.message
-                });
-            }
-        }
-    });
 
     ipcMain.handle('interrupt-vcp-request', async (event, { messageId }) => {
         try {

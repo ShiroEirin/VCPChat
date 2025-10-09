@@ -284,8 +284,9 @@ window.chatManager = (() => {
             const currentSelectedItem = currentSelectedItemRef.get();
             
             // Explicitly start watcher for the new topic
-            if (electronAPI.watcherStart && currentSelectedItem.config?.agentDataPath) {
-                const historyFilePath = `${currentSelectedItem.config.agentDataPath}\\topics\\${topicId}\\history.json`;
+            const agentConfigForWatcher = currentSelectedItem.config || currentSelectedItem;
+            if (electronAPI.watcherStart && agentConfigForWatcher?.agentDataPath) {
+                const historyFilePath = `${agentConfigForWatcher.agentDataPath}\\topics\\${topicId}\\history.json`;
                 await electronAPI.watcherStart(historyFilePath, currentSelectedItem.id, topicId);
             }
 
@@ -301,12 +302,13 @@ window.chatManager = (() => {
 
     async function handleTopicDeletion(remainingTopics) {
         let currentSelectedItem = currentSelectedItemRef.get();
-        currentSelectedItem.config.topics = remainingTopics;
+        const config = currentSelectedItem.config || currentSelectedItem;
+        config.topics = remainingTopics;
         currentSelectedItemRef.set(currentSelectedItem);
 
         if (remainingTopics && remainingTopics.length > 0) {
             const newSelectedTopic = remainingTopics.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))[0];
-            await selectItem(currentSelectedItem.id, currentSelectedItem.type, currentSelectedItem.name, currentSelectedItem.avatarUrl, currentSelectedItem.config);
+            await selectItem(currentSelectedItem.id, currentSelectedItem.type, currentSelectedItem.name, currentSelectedItem.avatarUrl, (currentSelectedItem.config || currentSelectedItem));
             await loadChatHistory(currentSelectedItem.id, currentSelectedItem.type, newSelectedTopic.id);
             currentTopicIdRef.set(newSelectedTopic.id);
             if (messageRenderer) messageRenderer.setCurrentTopicId(newSelectedTopic.id);
@@ -348,8 +350,9 @@ window.chatManager = (() => {
             return;
         }
     
+        // 核心修改：使用 await 确保加载消息被渲染
         if (messageRenderer) {
-            messageRenderer.renderMessage({ role: 'system', name: '系统', content: '加载聊天记录中...', timestamp: Date.now(), isThinking: true, id: 'loading_history' });
+            await messageRenderer.renderMessage({ role: 'system', name: '系统', content: '加载聊天记录中...', timestamp: Date.now(), isThinking: true, id: 'loading_history' });
         }
     
         let historyResult;
@@ -360,8 +363,9 @@ window.chatManager = (() => {
         }
     
         const currentSelectedItem = currentSelectedItemRef.get();
-        if (electronAPI.watcherStart && currentSelectedItem.config?.agentDataPath) {
-            const historyFilePath = `${currentSelectedItem.config.agentDataPath}\\topics\\${topicId}\\history.json`;
+        const agentConfigForHistory = currentSelectedItem.config || currentSelectedItem;
+        if (electronAPI.watcherStart && agentConfigForHistory?.agentDataPath) {
+            const historyFilePath = `${agentConfigForHistory.agentDataPath}\\topics\\${topicId}\\history.json`;
             await electronAPI.watcherStart(historyFilePath, itemId, topicId);
         }
     
@@ -374,7 +378,16 @@ window.chatManager = (() => {
         } else if (historyResult && historyResult.length > 0) {
             currentChatHistoryRef.set(historyResult);
             if (messageRenderer) {
-                historyResult.forEach(msg => messageRenderer.renderMessage(msg, true));
+                // 使用优化的分批渲染策略
+                const renderOptions = {
+                    initialBatch: 5,    // 首先显示最新的5条消息
+                    batchSize: 10,      // 后续每批10条消息
+                    batchDelay: 80      // 批次间延迟80ms，平衡性能和用户体验
+                };
+                
+                console.log(`[ChatManager] 开始加载话题历史，共 ${historyResult.length} 条消息`);
+                await messageRenderer.renderHistory(historyResult, renderOptions);
+                console.log(`[ChatManager] 话题历史加载完成`);
             }
     
         } else if (historyResult) { // History is empty
@@ -464,7 +477,11 @@ window.chatManager = (() => {
                 return;
             }
             // 使用最新的配置更新内存中的状态，以保持同步
-            currentSelectedItem.config = agentConfigForSummary;
+            if (currentSelectedItem.config) {
+                currentSelectedItem.config = agentConfigForSummary;
+            } else {
+                Object.assign(currentSelectedItem, agentConfigForSummary);
+            }
             currentSelectedItemRef.set(currentSelectedItem);
 
             const topics = agentConfigForSummary.topics || [];
@@ -539,7 +556,7 @@ window.chatManager = (() => {
         // --- Standard Agent Message Sending ---
         // The 'content' variable still holds the user's raw input, including the placeholder.
         // We will resolve the placeholder later, only for the final message sent to VCP.
-        let contentForVCP = content;
+        let combinedTextContent = content; // 用于发送给VCP的组合文本内容
  
         const uiAttachments = [];
         if (attachedFiles.length > 0) {
@@ -552,16 +569,19 @@ window.chatManager = (() => {
                     size: af.file.size,
                     _fileManagerData: fileManagerData
                 });
-                // Append filename for all attachments for AI context
-                // NEW LOGIC: Generalize for all file types to include local path
+
+                // 修正：将文件路径和提取的文本正确地附加到 combinedTextContent
+                const filePathForContext = af.localPath || af.originalName;
+
                 if (af.file.type.startsWith('image/')) {
-                    contentForVCP += `\n\n[附加图片: ${af.localPath}]`;
+                    // 对于图片，我们只附加路径，因为内容将作为多模态部分发送
+                    combinedTextContent += `\n\n[附加图片: ${filePathForContext}]`;
                 } else if (fileManagerData.extractedText) {
-                    // For other files with extracted text, add the path and keep the text
-                    contentForVCP += `\n\n[附加文件: ${af.localPath}]\n${fileManagerData.extractedText}\n[/附加文件结束: ${af.originalName}]`;
+                    // 对于有提取文本的文件，同时附加路径和文本
+                    combinedTextContent += `\n\n[附加文件: ${filePathForContext}]\n${fileManagerData.extractedText}\n[/附加文件结束: ${af.originalName}]`;
                 } else {
-                    // For other files without extracted text, just use the path
-                    contentForVCP += `\n\n[附加文件: ${af.localPath}]`;
+                    // 对于其他文件（如音频、视频、无文本的PDF等），只附加路径
+                    combinedTextContent += `\n\n[附加文件: ${filePathForContext}]`;
                 }
             }
         }
@@ -600,13 +620,13 @@ window.chatManager = (() => {
         const thinkingMessageId = `msg_${Date.now()}_assistant_${Math.random().toString(36).substring(2, 9)}`;
         const thinkingMessage = {
             role: 'assistant',
-            name: currentSelectedItem.name || 'AI',
+            name: currentSelectedItem.name || currentSelectedItem.id || 'AI', // 修复：使用 ID 作为更可靠的回退
             content: '思考中...',
             timestamp: Date.now(),
             id: thinkingMessageId,
             isThinking: true,
             avatarUrl: currentSelectedItem.avatarUrl,
-            avatarColor: currentSelectedItem.config?.avatarCalculatedColor
+            avatarColor: (currentSelectedItem.config || currentSelectedItem)?.avatarCalculatedColor
         };
 
         let thinkingMessageItem = null;
@@ -619,7 +639,7 @@ window.chatManager = (() => {
         currentChatHistoryRef.set(currentChatHistoryWithThinking);
 
         try {
-            const agentConfig = currentSelectedItem.config;
+            const agentConfig = currentSelectedItem.config || currentSelectedItem;
             const currentChatHistory = currentChatHistoryRef.get();
             const historySnapshotForVCP = currentChatHistory.filter(msg => msg.id !== thinkingMessage.id && !msg.isThinking);
 
@@ -666,32 +686,27 @@ window.chatManager = (() => {
                 // --- 正则规则应用结束 ---
 
                 if (msg.role === 'user' && msg.id === userMessage.id) {
-                    // This is the current user message being sent.
-                    // IMPORTANT: We need to handle Canvas placeholder WITHOUT overwriting the regex-processed content
+                    // 关键修复：使用已经包含附件内容的 combinedTextContent
+                    currentMessageTextContent = combinedTextContent;
                     
+                    // IMPORTANT: We need to handle Canvas placeholder WITHOUT overwriting the combined content
                     // First, check if we need to replace Canvas placeholder
-                    if (contentForVCP.includes(CANVAS_PLACEHOLDER)) {
-                        // We need to apply Canvas replacement to the already regex-processed content
-                        // NOT to the original contentForVCP
-                        let baseContent = currentMessageTextContent; // This already has regex rules applied
-                        
+                    if (currentMessageTextContent.includes(CANVAS_PLACEHOLDER)) {
                         try {
                             const canvasData = await electronAPI.getLatestCanvasContent();
                             if (canvasData && !canvasData.error) {
                                 const formattedCanvasContent = `\n[Canvas Content]\n${canvasData.content || ''}\n[Canvas Path]\n${canvasData.path || 'No file path'}\n[Canvas Errors]\n${canvasData.errors || 'No errors'}\n`;
-                                // Replace Canvas placeholder in the regex-processed content
-                                currentMessageTextContent = baseContent.replace(new RegExp(CANVAS_PLACEHOLDER, 'g'), formattedCanvasContent);
+                                // Replace Canvas placeholder in the combined content
+                                currentMessageTextContent = currentMessageTextContent.replace(new RegExp(CANVAS_PLACEHOLDER, 'g'), formattedCanvasContent);
                             } else {
                                 console.error("Failed to get latest canvas content:", canvasData?.error);
-                                currentMessageTextContent = baseContent.replace(new RegExp(CANVAS_PLACEHOLDER, 'g'), '\n[Canvas content could not be loaded]\n');
+                                currentMessageTextContent = currentMessageTextContent.replace(new RegExp(CANVAS_PLACEHOLDER, 'g'), '\n[Canvas content could not be loaded]\n');
                             }
                         } catch (error) {
                             console.error("Error fetching canvas content:", error);
-                            currentMessageTextContent = baseContent.replace(new RegExp(CANVAS_PLACEHOLDER, 'g'), '\n[Error loading canvas content]\n');
+                            currentMessageTextContent = currentMessageTextContent.replace(new RegExp(CANVAS_PLACEHOLDER, 'g'), '\n[Error loading canvas content]\n');
                         }
                     }
-                    // If no Canvas placeholder, keep the regex-processed content as is
-                    // (no else clause needed since currentMessageTextContent already has the right value)
                 } else if (msg.attachments && msg.attachments.length > 0) {
                     let historicalAppendedText = "";
                     for (const att of msg.attachments) {
@@ -869,6 +884,7 @@ window.chatManager = (() => {
 
             const context = {
                 agentId: currentSelectedItem.id,
+                agentName: currentSelectedItem.name || currentSelectedItem.id, // 修复：为单聊上下文添加 agentName，并使用 ID 作为回退
                 topicId: currentTopicId,
                 isGroupMessage: false
             };
@@ -905,9 +921,9 @@ window.chatManager = (() => {
                     const assistantMessageContent = response.choices[0].message.content;
                     const assistantMessage = {
                         role: 'assistant',
-                        name: context.agentName || 'AI', // Use context name
+                        name: context.agentName || context.agentId || 'AI', // 修复：使用 context 中的 agentName 或 agentId 作为回退
                         avatarUrl: currentSelectedItem.avatarUrl, // This might be incorrect if user switched, but it's a minor UI detail for background saves.
-                        avatarColor: currentSelectedItem.config?.avatarCalculatedColor,
+                        avatarColor: (currentSelectedItem.config || currentSelectedItem)?.avatarCalculatedColor,
                         content: assistantMessageContent,
                         timestamp: Date.now(),
                         id: `msg_${Date.now()}_assistant_${Math.random().toString(36).substring(2, 9)}`

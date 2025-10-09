@@ -151,7 +151,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     searchTopicsByContent: (itemId, itemType, searchTerm) => ipcRenderer.invoke('search-topics-by-content', itemId, itemType, searchTerm), // Added for content search
     inviteAgentToSpeak: (groupId, topicId, invitedAgentId) => ipcRenderer.invoke('inviteAgentToSpeak', groupId, topicId, invitedAgentId), // 新增：邀请Agent发言
     redoGroupChatMessage: (groupId, topicId, messageId, agentId) => ipcRenderer.invoke('redo-group-chat-message', groupId, topicId, messageId, agentId), // 新增：重新生成群聊消息
-
+    interruptGroupRequest: (messageId) => ipcRenderer.invoke('interrupt-group-request', messageId), // 新增：中断群聊消息
+ 
     exportTopicAsMarkdown: (exportData) => ipcRenderer.invoke('export-topic-as-markdown', exportData), // 新增：导出话题功能
     // VCPLog Notifications
     connectVCPLog: (url, key) => ipcRenderer.send('connect-vcplog', { url, key }),
@@ -206,9 +207,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     openAdminPanel: () => ipcRenderer.invoke('open-admin-panel'), 
     onWindowMaximized: (callback) => ipcRenderer.on('window-maximized', (_event) => callback()),
     onWindowUnmaximized: (callback) => ipcRenderer.on('window-unmaximized', (_event) => callback()),
-
-    // Image Context Menu
-    showImageContextMenu: (imageUrl) => ipcRenderer.send('show-image-context-menu', imageUrl),
+    minimizeToTray: () => ipcRenderer.send('minimize-to-tray'),
+ 
+     // Image Context Menu
+     showImageContextMenu: (imageUrl) => ipcRenderer.send('show-image-context-menu', imageUrl),
     // Open Image in New Window
     openImageViewer: (data) => ipcRenderer.send('open-image-viewer', data), // { src, title, theme }
     // Open Text in New Window (Read Mode)
@@ -242,6 +244,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
     getCurrentTheme: () => ipcRenderer.invoke('get-current-theme'),
     setTheme: (theme) => ipcRenderer.send('set-theme', theme),
+    setThemeMode: (themeMode) => ipcRenderer.send('set-theme-mode', themeMode),
 
     // Themes
     openThemesWindow: () => ipcRenderer.send('open-themes-window'),
@@ -276,8 +279,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
     // Voice Chat
     openVoiceChatWindow: (data) => ipcRenderer.send('open-voice-chat-window', data),
     onVoiceChatData: (callback) => ipcRenderer.on('voice-chat-data', (_event, data) => callback(data)),
-    sendVoiceChatMessage: (data) => ipcRenderer.send('send-voice-chat-message', data),
-    onVoiceChatReply: (callback) => ipcRenderer.on('voice-chat-reply', (_event, data) => callback(data)),
 
     // --- Speech Recognition via Puppeteer ---
     startSpeechRecognition: () => ipcRenderer.send('start-speech-recognition'),

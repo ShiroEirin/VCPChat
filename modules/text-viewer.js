@@ -1,178 +1,29 @@
+import * as emoticonFixer from './renderer/emoticonUrlFixer.js';
+
 document.addEventListener('DOMContentLoaded', async () => {
-    // --- Start: Emoticon URL Fixer ---
-    let emoticonLibrary = [];
-    let isEmoticonFixerInitialized = false;
-
-    // A simple string similarity function (Jaro-Winkler might be better, but this is simple)
-    function getSimilarity(s1, s2) {
-        let longer = s1;
-        let shorter = s2;
-        if (s1.length < s2.length) {
-            longer = s2;
-            shorter = s1;
-        }
-        const longerLength = longer.length;
-        if (longerLength === 0) {
-            return 1.0;
-        }
-        return (longerLength - editDistance(longer, shorter)) / parseFloat(longerLength);
-    }
-
-    function editDistance(s1, s2) {
-        s1 = s1.toLowerCase();
-        s2 = s2.toLowerCase();
-
-        const costs = [];
-        for (let i = 0; i <= s1.length; i++) {
-            let lastValue = i;
-            for (let j = 0; j <= s2.length; j++) {
-                if (i === 0) {
-                    costs[j] = j;
-                } else {
-                    if (j > 0) {
-                        let newValue = costs[j - 1];
-                        if (s1.charAt(i - 1) !== s2.charAt(j - 1)) {
-                            newValue = Math.min(Math.min(newValue, lastValue), costs[j]) + 1;
-                        }
-                        costs[j - 1] = lastValue;
-                        lastValue = newValue;
-                    }
-                }
-            }
-            if (i > 0) {
-                costs[s2.length] = lastValue;
-            }
-        }
-        return costs[s2.length];
-    }
-    
-    function extractEmoticonInfo(url) {
-        let filename = null;
-        let packageName = null;
-
-        if (!url) return { filename, packageName };
-
-        try {
-            const decodedPath = decodeURIComponent(new URL(url).pathname);
-            const parts = decodedPath.split('/').filter(Boolean);
-            if (parts.length > 0) {
-                filename = parts[parts.length - 1];
-            }
-            if (parts.length > 1) {
-                packageName = parts[parts.length - 2];
-            }
-        } catch (e) {
-            try {
-                const decodedUrl = decodeURIComponent(url);
-                const parts = decodedUrl.split('/').filter(Boolean);
-                if (parts.length > 0) {
-                    filename = parts[parts.length - 1];
-                }
-                if (parts.length > 1) {
-                    packageName = parts[parts.length - 2];
-                }
-            } catch (e2) {
-                const parts = url.split('/').filter(Boolean);
-                if (parts.length > 0) {
-                    filename = parts[parts.length - 1];
-                }
-                if (parts.length > 1) {
-                    packageName = parts[parts.length - 2];
-                }
-            }
-        }
-        
-        return { filename, packageName };
-    }
-
-    async function initializeEmoticonFixer() {
-        if (isEmoticonFixerInitialized || !window.electronAPI) return;
-        try {
-            console.log('[TextViewer-EmoticonFixer] Initializing and fetching library...');
-            const library = await window.electronAPI.getEmoticonLibrary();
-            if (library && library.length > 0) {
-                emoticonLibrary = library;
-                isEmoticonFixerInitialized = true;
-                console.log(`[TextViewer-EmoticonFixer] Library loaded with ${emoticonLibrary.length} items.`);
-            } else {
-                console.warn('[TextViewer-EmoticonFixer] Fetched library is empty.');
-            }
-        } catch (error) {
-            console.error('[TextViewer-EmoticonFixer] Failed to initialize:', error);
-        }
-    }
-
-    function fixEmoticonUrl(originalSrc) {
-        if (!isEmoticonFixerInitialized || emoticonLibrary.length === 0) {
-            return originalSrc;
-        }
-        try {
-            const decodedOriginalSrc = decodeURIComponent(originalSrc);
-            if (emoticonLibrary.some(item => decodeURIComponent(item.url) === decodedOriginalSrc)) {
-                return originalSrc;
-            }
-        } catch (e) {
-            // Malformed URL, proceed to fuzzy matching
-        }
-        try {
-            if (!decodeURIComponent(originalSrc).includes('表情包')) {
-                return originalSrc;
-            }
-        } catch (e) {
-            return originalSrc;
-        }
-
-        const searchInfo = extractEmoticonInfo(originalSrc);
-        if (!searchInfo.filename) {
-            return originalSrc;
-        }
-
-        let bestMatch = null;
-        let highestScore = -1;
-
-        for (const item of emoticonLibrary) {
-            const itemPackageInfo = extractEmoticonInfo(item.url);
-            let packageScore = 0.5;
-            if (searchInfo.packageName && itemPackageInfo.packageName) {
-                packageScore = getSimilarity(searchInfo.packageName, itemPackageInfo.packageName);
-            } else if (!searchInfo.packageName && !itemPackageInfo.packageName) {
-                packageScore = 1.0;
-            } else {
-                packageScore = 0.0;
-            }
-            const filenameScore = getSimilarity(searchInfo.filename, item.filename);
-            const score = (0.7 * packageScore) + (0.3 * filenameScore);
-            if (score > highestScore) {
-                highestScore = score;
-                bestMatch = item;
-            }
-        }
-
-        if (bestMatch && highestScore > 0.6) {
-            console.log(`[TextViewer-EmoticonFixer] Fixed URL. Original: "${originalSrc}", Best Match: "${bestMatch.url}" (Score: ${highestScore.toFixed(2)})`);
-            return bestMatch.url;
-        }
-        return originalSrc;
-    }
-
+    // --- Start: Emoticon URL Fixer (Module) ---
+    // The main logic is now imported from emoticonUrlFixer.js
     async function fixEmoticonImagesInContainer(container) {
-        if (!isEmoticonFixerInitialized) {
-            return;
+        // Ensure the fixer is initialized before trying to fix URLs.
+        // The initialize function is idempotent and returns a promise.
+        if (window.electronAPI) {
+            await emoticonFixer.initialize(window.electronAPI);
         }
+
         const images = container.querySelectorAll('img');
         images.forEach(img => {
             const originalSrc = img.getAttribute('src');
             if (originalSrc) {
-                const fixedSrc = fixEmoticonUrl(originalSrc);
+                const fixedSrc = emoticonFixer.fixEmoticonUrl(originalSrc);
                 if (originalSrc !== fixedSrc) {
                     img.src = fixedSrc;
                 }
             }
         });
     }
-    // --- End: Emoticon URL Fixer ---
+    // --- End: Emoticon URL Fixer (Module) ---
 
-    initializeEmoticonFixer(); // Initialize when the script loads
+    // Initialization is now handled on-demand inside fixEmoticonImagesInContainer.
 
     let originalRawContent = ''; // To store the raw, un-rendered content
 
@@ -695,6 +546,52 @@ document.addEventListener('DOMContentLoaded', async () => {
         return textarea.value;
     }
 
+    function applyBoldFormatting(container) {
+        const walker = document.createTreeWalker(
+            container,
+            NodeFilter.SHOW_TEXT,
+            { acceptNode: (node) => {
+                // 拒绝在这些元素内进行加粗处理
+                if (node.parentElement.closest('pre, code, script, style, .vcp-tool-use-bubble, .vcp-tool-result-bubble, a')) {
+                    return NodeFilter.FILTER_REJECT;
+                }
+                // 只接受包含 "**" 的文本节点
+                if (/\*\*/.test(node.nodeValue)) {
+                    return NodeFilter.FILTER_ACCEPT;
+                }
+                return NodeFilter.FILTER_SKIP;
+            }},
+            false
+        );
+
+        const nodesToProcess = [];
+        // TreeWalker 会动态变化，所以先收集所有节点
+        while (walker.nextNode()) {
+            nodesToProcess.push(walker.currentNode);
+        }
+
+        nodesToProcess.forEach(node => {
+            const parent = node.parentElement;
+            if (!parent) return;
+
+            const fragment = document.createDocumentFragment();
+            // 使用正则表达式分割文本，保留分隔符
+            const parts = node.nodeValue.split(/(\*\*.*?\*\*)/g);
+
+            parts.forEach(part => {
+                if (part.startsWith('**') && part.endsWith('**')) {
+                    const strong = document.createElement('strong');
+                    strong.textContent = part.slice(2, -2);
+                    fragment.appendChild(strong);
+                } else if (part) { // 避免添加空的文本节点
+                    fragment.appendChild(document.createTextNode(part));
+                }
+            });
+            // 用新的文档片段替换旧的文本节点
+            parent.replaceChild(fragment, node);
+        });
+    }
+
     const textContent = params.get('text');
     const windowTitle = params.get('title') || '文本阅读模式';
     const encoding = params.get('encoding');
@@ -1155,6 +1052,9 @@ ${codeContent}
         
         // --- Call animation processor after all other enhancements ---
         processAnimationsInContent(container);
+
+        // --- Final formatting pass for bold text ---
+        applyBoldFormatting(container);
     }
 
     if (textContent) {

@@ -2,7 +2,7 @@
 
 const sharp = require('sharp'); // 确保在文件顶部引入
 
-const { app, BrowserWindow, ipcMain, nativeTheme, globalShortcut, screen, clipboard, shell, dialog, protocol } = require('electron'); // Added screen, clipboard, and shell
+const { app, BrowserWindow, ipcMain, nativeTheme, globalShortcut, screen, clipboard, shell, dialog, protocol, Tray, Menu } = require('electron'); // Added screen, clipboard, and shell
 // selection-hook is now managed in assistantHandlers
 const path = require('path');
 const crypto = require('crypto');
@@ -117,6 +117,7 @@ const NOTES_AGENT_ID = 'notes_attachments_agent';
 
 let audioEngineProcess = null; // To hold the python audio engine process
 let mainWindow;
+let tray = null;
 let vcpLogWebSocket;
 let vcpLogReconnectInterval;
 let openChildWindows = [];
@@ -239,6 +240,34 @@ function createWindow() {
     });
 
     // Listen for theme changes and notify all relevant windows
+}
+
+function createTray() {
+    const iconPath = path.join(__dirname, 'assets', 'icon.png');
+    tray = new Tray(iconPath);
+
+    const contextMenu = Menu.buildFromTemplate([
+        {
+            label: '显示/隐藏',
+            click: () => {
+                mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show();
+            }
+        },
+        {
+            label: '退出',
+            click: () => {
+                app.isQuitting = true;
+                app.quit();
+            }
+        }
+    ]);
+
+    tray.setToolTip('VCP AI 聊天客户端');
+    tray.setContextMenu(contextMenu);
+
+    tray.on('click', () => {
+        mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show();
+    });
 }
 
 // --- App Lifecycle ---
@@ -449,6 +478,7 @@ if (!gotTheLock) {
     });
 
     createWindow();
+    createTray();
     windowHandlers.initialize(mainWindow, openChildWindows);
     assistantHandlers.initialize({ SETTINGS_FILE });
     fileDialogHandlers.initialize(mainWindow, {
@@ -514,10 +544,16 @@ if (!gotTheLock) {
     sovitsHandlers.initialize(mainWindow); // Initialize SovitsTTS handlers
     musicHandlers.initialize({ mainWindow, openChildWindows, APP_DATA_ROOT_IN_PROJECT, startAudioEngine, stopAudioEngine });
     diceHandlers.initialize({ projectRoot: PROJECT_ROOT });
-    themeHandlers.initialize({ mainWindow, openChildWindows, projectRoot: PROJECT_ROOT, APP_DATA_ROOT_IN_PROJECT, settingsManager });
+    themeHandlers.initialize({ mainWindow, openChildWindows, projectRoot: PROJECT_ROOT, APP_DATA_ROOT_IN_PROJECT, settingsManager: settingsManager });
     emoticonHandlers.initialize({ SETTINGS_FILE, APP_DATA_ROOT_IN_PROJECT });
     emoticonHandlers.setupEmoticonHandlers();
     canvasHandlers.initialize({ mainWindow, openChildWindows, CANVAS_CACHE_DIR });
+
+    ipcMain.on('minimize-to-tray', () => {
+        if (mainWindow) {
+            mainWindow.hide();
+        }
+    });
  
      // --- Distributed Server Initialization ---
      (async () => {
@@ -872,3 +908,14 @@ async function handleCanvasControl(filePath) {
         return { status: 'error', message: error.message };
     }
 }
+
+// --- Group Chat Interrupt Handler ---
+ipcMain.handle('interrupt-group-request', (event, messageId) => {
+    console.log(`[Main] Received interrupt-group-request for messageId: ${messageId}`);
+    if (groupChat && typeof groupChat.interruptGroupRequest === 'function') {
+        return groupChat.interruptGroupRequest(messageId);
+    } else {
+        console.error('[Main] groupChat module or interruptGroupRequest function is not available.');
+        return { success: false, error: 'Group chat module not initialized correctly.' };
+    }
+});
