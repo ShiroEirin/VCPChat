@@ -8,6 +8,7 @@ yarn-error.log*
 
 # Poetry 虚拟环境
 .venv/
+
 # 用户数据和缓存
 AppData/
 **/WallpaperThumbnailCache/
@@ -60,6 +61,7 @@ dist/
 build/
 .next/
 out/
+/public/assets
 
 # 系统文件
 run_silent.vbs
