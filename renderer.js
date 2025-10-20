@@ -7,7 +7,10 @@ let globalSettings = {
     middleClickAdvancedDelay: 1000,
     notificationsSidebarWidth: 300,
     userName: '用户', // Default username
-    doNotDisturbLogMode: false, // 勿扰模式状态
+    doNotDisturbLogMode: false, // 勿扰模式状态（已废弃，保留兼容性）
+    filterEnabled: false, // 过滤总开关状态
+    filterRules: [], // 过滤规则列表
+    enableRegenerateConfirmation: true, // 重新回复确认机制开关
 };
 // Unified selected item state
 let currentSelectedItem = {
@@ -683,6 +686,19 @@ import * as interruptHandler from './modules/interruptHandler.js';
         await loadAndApplyGlobalSettings();
         await window.itemListManager.loadItems(); // Load both agents and groups
 
+        // Initialize Filter Manager
+        if (window.filterManager) {
+            window.filterManager.init({
+                electronAPI: window.electronAPI,
+                uiHelper: uiHelperFunctions,
+                refs: {
+                    globalSettingsRef: { get: () => globalSettings, set: (newSettings) => globalSettings = newSettings },
+                }
+            });
+        } else {
+            console.error('[RENDERER_INIT] filterManager module not found!');
+        }
+
         setupEventListeners();
         window.topicListManager.setupTopicSearch(); // Ensure this is called after DOM for topic search input is ready
         if(messageInput) uiHelperFunctions.autoResizeTextarea(messageInput);
@@ -1011,14 +1027,28 @@ async function loadAndApplyGlobalSettings() {
         if (contextSanitizerDepthContainer) {  
             contextSanitizerDepthContainer.style.display = globalSettings.enableContextSanitizer === true ? 'block' : 'none';  
         }
-        // Load do not disturb mode setting (check both globalSettings and localStorage)
-        const doNotDisturbLogMode = globalSettings.doNotDisturbLogMode || (localStorage.getItem('doNotDisturbLogMode') === 'true');
-        if (doNotDisturbLogMode) {
+        // Load filter mode setting (migrate from old doNotDisturbLogMode if exists)
+        let filterEnabled = globalSettings.filterEnabled;
+        if (filterEnabled === undefined) {
+            // Migrate from old doNotDisturbLogMode setting for backward compatibility
+            const oldDoNotDisturbMode = globalSettings.doNotDisturbLogMode || (localStorage.getItem('doNotDisturbLogMode') === 'true');
+            filterEnabled = oldDoNotDisturbMode;
+            globalSettings.filterEnabled = filterEnabled;
+            // Also migrate to new setting name for consistency
+            globalSettings.doNotDisturbLogMode = filterEnabled;
+        }
+
+        if (filterEnabled) {
             doNotDisturbBtn.classList.add('active');
-            globalSettings.doNotDisturbLogMode = true;
+            globalSettings.filterEnabled = true;
         } else {
             doNotDisturbBtn.classList.remove('active');
-            globalSettings.doNotDisturbLogMode = false;
+            globalSettings.filterEnabled = false;
+        }
+
+        // Load filter rules
+        if (!Array.isArray(globalSettings.filterRules)) {
+            globalSettings.filterRules = [];
         }
 
         // Load middle click quick action settings
@@ -1030,6 +1060,12 @@ async function loadAndApplyGlobalSettings() {
         const advancedDelayInput = document.getElementById('middleClickAdvancedDelay');
         const delayValue = globalSettings.middleClickAdvancedDelay || 1000;
         advancedDelayInput.value = delayValue >= 1000 ? delayValue : 1000; // Ensure minimum 1000ms
+
+        // Load regenerate confirmation setting
+        const regenerateConfirmationCheckbox = document.getElementById('enableRegenerateConfirmation');
+        if (regenerateConfirmationCheckbox) {
+            regenerateConfirmationCheckbox.checked = globalSettings.enableRegenerateConfirmation !== false;
+        }
 
         // Show/hide containers based on enable settings
         const middleClickContainer = document.getElementById('middleClickQuickActionContainer');
@@ -1187,6 +1223,7 @@ function setupEventListeners() {
             middleClickQuickAction: document.getElementById('middleClickQuickAction').value,
             enableMiddleClickAdvanced: document.getElementById('enableMiddleClickAdvanced').checked,
             middleClickAdvancedDelay: Math.max(1000, parseInt(document.getElementById('middleClickAdvancedDelay').value, 10) || 1000),
+            enableRegenerateConfirmation: document.getElementById('enableRegenerateConfirmation').checked,
             vcpServerUrl: window.settingsManager.completeVcpUrl(document.getElementById('vcpServerUrl').value.trim()),
             vcpApiKey: document.getElementById('vcpApiKey').value,
             vcpLogUrl: document.getElementById('vcpLogUrl').value.trim(),
@@ -1333,31 +1370,6 @@ function setupEventListeners() {
         notificationsListUl.innerHTML = '';
     });
 
-    if (doNotDisturbBtn) {
-        doNotDisturbBtn.addEventListener('click', async () => {
-            const isActive = doNotDisturbBtn.classList.toggle('active');
-            globalSettings.doNotDisturbLogMode = isActive;
-
-            // Also save to localStorage as backup
-            localStorage.setItem('doNotDisturbLogMode', isActive.toString());
-
-            // Save the setting immediately
-            const result = await window.electronAPI.saveSettings({
-                ...globalSettings, // Send all settings to avoid overwriting
-                doNotDisturbLogMode: isActive
-            });
-
-            if (result.success) {
-                uiHelperFunctions.showToastNotification(`勿扰模式已${isActive ? '开启' : '关闭'}`, 'info');
-            } else {
-                uiHelperFunctions.showToastNotification(`设置勿扰模式失败: ${result.error}`, 'error');
-                // Revert UI on failure
-                doNotDisturbBtn.classList.toggle('active', !isActive);
-                globalSettings.doNotDisturbLogMode = !isActive;
-                localStorage.setItem('doNotDisturbLogMode', (!isActive).toString());
-            }
-        });
-    }
 
 
     const openTranslatorBtn = document.getElementById('openTranslatorBtn');
@@ -1385,6 +1397,27 @@ function setupEventListeners() {
             enableMiddleClickAdvancedCheckbox.addEventListener('change', () => {
                 middleClickAdvancedSettings.style.display = enableMiddleClickAdvancedCheckbox.checked ? 'block' : 'none';
             });
+        }
+
+        // Add event listener for middle click quick action selection to control regenerate confirmation visibility
+        const middleClickQuickActionSelect = document.getElementById('middleClickQuickAction');
+        const regenerateConfirmationContainer = document.getElementById('regenerateConfirmationContainer');
+
+        if (enableMiddleClickCheckbox && middleClickQuickActionSelect && regenerateConfirmationContainer) {
+            const updateRegenerateConfirmationVisibility = () => {
+                const isMiddleClickEnabled = enableMiddleClickCheckbox.checked;
+                const selectedAction = middleClickQuickActionSelect.value;
+                const shouldShowConfirmation = isMiddleClickEnabled && selectedAction === 'regenerate';
+
+                regenerateConfirmationContainer.style.display = shouldShowConfirmation ? 'block' : 'none';
+            };
+
+            // Initial check
+            updateRegenerateConfirmationVisibility();
+
+            // Listen for changes on both controls
+            enableMiddleClickCheckbox.addEventListener('change', updateRegenerateConfirmationVisibility);
+            middleClickQuickActionSelect.addEventListener('change', updateRegenerateConfirmationVisibility);
         }
 
         // Add validation for middle click advanced delay input
@@ -1487,6 +1520,18 @@ function setupEventListeners() {
             window.electronAPI.sendToggleNotificationsSidebar(); // Send to main
         });
 
+        // 新增：右键单击打开VCP信息流监控面板
+        toggleNotificationsBtn.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            console.log('Right-click on toggleNotificationsBtn detected, opening RAG Observer.');
+            if (window.electronAPI && window.electronAPI.openRAGObserverWindow) {
+                window.electronAPI.openRAGObserverWindow();
+            } else {
+                console.error('electronAPI.openRAGObserverWindow is not defined!');
+                uiHelperFunctions.showToastNotification('功能缺失: preload.js需要更新。', 'error');
+            }
+        });
+
         // Listen for main process to actually toggle
         window.electronAPI.onDoToggleNotificationsSidebar(() => {
             const isActive = notificationsSidebar.classList.toggle('active');
@@ -1546,7 +1591,56 @@ function setupEventListeners() {
             contextSanitizerDepthContainer.style.display = enableContextSanitizerCheckbox.checked ? 'block' : 'none';
         });
     }
+
+    // 添加全局键盘快捷键监听器
+    document.addEventListener('keydown', (e) => {
+        // Ctrl+S 或 Command+S 保存设置快捷键
+        if ((e.ctrlKey || e.metaKey) && e.key === 's' && !e.shiftKey) {
+            e.preventDefault();
+
+            // 检查当前是否在设置页面
+            const tabContentSettings = document.getElementById('tabContentSettings');
+            if (tabContentSettings && tabContentSettings.classList.contains('active')) {
+                handleQuickSaveSettings();
+            }
+        }
+
+        // Ctrl+E 或 Command+E 导出话题快捷键
+        if ((e.ctrlKey || e.metaKey) && e.key === 'e') {
+            e.preventDefault();
+
+            // 检查当前是否有话题打开
+            if (currentTopicId && currentSelectedItem.id) {
+                handleQuickExportTopic();
+            }
+        }
+    });
 }
+    // --- Dynamic Seam Fixer Width ---
+    const seamFixer = document.getElementById('title-bar-seam-fixer');
+
+    if (seamFixer && notificationsSidebar) {
+        const setSeamFixerWidth = () => {
+            // Use getBoundingClientRect for precise width, including borders/padding.
+            const sidebarWidth = notificationsSidebar.getBoundingClientRect().width;
+            // When the sidebar is visible (width > 0), add a 2px offset to account for the resizer.
+            const offset = sidebarWidth > 0 ? 3 : 0;
+            seamFixer.style.right = `${sidebarWidth + offset}px`;
+        };
+
+        // Use ResizeObserver to watch for width changes (e.g., from dragging the resizer).
+        const resizeObserver = new ResizeObserver(setSeamFixerWidth);
+        resizeObserver.observe(notificationsSidebar);
+
+        // Use MutationObserver to watch for class/style changes (e.g., toggling the 'active' class).
+        // This is crucial because toggling the sidebar might not fire a resize event immediately.
+        const mutationObserver = new MutationObserver(setSeamFixerWidth);
+        mutationObserver.observe(notificationsSidebar, { attributes: true, attributeFilter: ['class', 'style'] });
+
+        // Set the initial width on load.
+        setSeamFixerWidth();
+    }
+    // --- End Dynamic Seam Fixer Width ---
 
 
  
@@ -1836,3 +1930,138 @@ window.showForwardModal = showForwardModal;
 
 // Make globalSettings accessible for notification renderer
 window.globalSettings = globalSettings;
+
+// Make filter functions globally accessible for notification renderer
+window.checkMessageFilter = (messageTitle) => {
+    if (window.filterManager) {
+        return window.filterManager.checkMessageFilter(messageTitle);
+    }
+    // Fallback if the manager is not available
+    return null;
+};
+
+// --- 快捷键处理函数 ---
+
+/**
+ * 处理快速保存设置的快捷键功能
+ */
+function handleQuickSaveSettings() {
+    console.log('[快捷键] 执行快速保存设置');
+
+    // 检查当前选中的项目
+    if (!currentSelectedItem.id) {
+        uiHelperFunctions.showToastNotification('请先选择一个Agent或群组', 'warning');
+        return;
+    }
+
+    // 检查是否有未保存的更改
+    const agentSettingsForm = document.getElementById('agentSettingsForm');
+    if (agentSettingsForm && currentSelectedItem.type === 'agent') {
+        // 对于Agent设置，直接提交表单
+        if (agentSettingsForm) {
+            // 创建并派发一个假的表单提交事件
+            const fakeEvent = new Event('submit', {
+                bubbles: true,
+                cancelable: true
+            });
+            agentSettingsForm.dispatchEvent(fakeEvent);
+        } else {
+            uiHelperFunctions.showToastNotification('Agent设置表单不可用', 'error');
+        }
+    } else if (currentSelectedItem.type === 'group') {
+        // 对于群组设置，直接提交表单
+        const groupSettingsForm = document.getElementById('groupSettingsForm');
+        if (groupSettingsForm) {
+            // 创建并派发一个假的表单提交事件
+            const fakeEvent = new Event('submit', {
+                bubbles: true,
+                cancelable: true
+            });
+            groupSettingsForm.dispatchEvent(fakeEvent);
+        } else {
+            uiHelperFunctions.showToastNotification('群组设置表单不可用', 'error');
+        }
+    } else {
+        uiHelperFunctions.showToastNotification('当前没有可保存的设置', 'info');
+    }
+}
+
+/**
+ * 处理快速导出话题的快捷键功能
+ */
+async function handleQuickExportTopic() {
+    console.log('[快捷键] 执行快速导出话题');
+
+    if (!currentTopicId || !currentSelectedItem.id) {
+        uiHelperFunctions.showToastNotification('请先选择并打开一个话题', 'warning');
+        return;
+    }
+
+    try {
+        // 获取当前话题的名称
+        let topicName = '未命名话题';
+        if (currentSelectedItem.config && currentSelectedItem.config.topics) {
+            const currentTopic = currentSelectedItem.config.topics.find(t => t.id === currentTopicId);
+            if (currentTopic) {
+                topicName = currentTopic.name;
+            }
+        }
+
+        // 获取聊天消息内容
+        const chatMessagesDiv = document.getElementById('chatMessages');
+        if (!chatMessagesDiv) {
+            uiHelperFunctions.showToastNotification('错误：找不到聊天内容容器', 'error');
+            return;
+        }
+
+        const messageItems = chatMessagesDiv.querySelectorAll('.message-item');
+        if (messageItems.length === 0) {
+            uiHelperFunctions.showToastNotification('此话题没有可见的聊天内容可导出', 'info');
+            return;
+        }
+
+        // 构建Markdown内容
+        let markdownContent = `# 话题: ${topicName}\n\n`;
+        let extractedCount = 0;
+
+        messageItems.forEach((item) => {
+            if (item.classList.contains('system') || item.classList.contains('thinking')) {
+                return;
+            }
+
+            const senderElement = item.querySelector('.sender-name');
+            const contentElement = item.querySelector('.md-content');
+
+            if (senderElement && contentElement) {
+                const sender = senderElement.textContent.trim().replace(':', '');
+                let content = contentElement.innerText || contentElement.textContent || "";
+                content = content.trim();
+
+                if (sender && content) {
+                    markdownContent += `**${sender}**: ${content}\n\n---\n\n`;
+                    extractedCount++;
+                }
+            }
+        });
+
+        if (extractedCount === 0) {
+            uiHelperFunctions.showToastNotification('未能从当前话题中提取任何有效对话内容', 'warning');
+            return;
+        }
+
+        // 调用导出功能
+        const result = await window.electronAPI.exportTopicAsMarkdown({
+            topicName: topicName,
+            markdownContent: markdownContent
+        });
+
+        if (result.success) {
+            uiHelperFunctions.showToastNotification(`话题 "${topicName}" 已成功导出到: ${result.path}`, 'success');
+        } else {
+            uiHelperFunctions.showToastNotification(`导出话题失败: ${result.error}`, 'error');
+        }
+    } catch (error) {
+        console.error('[快捷键] 导出话题时发生错误:', error);
+        uiHelperFunctions.showToastNotification(`导出话题时发生错误: ${error.message}`, 'error');
+    }
+}

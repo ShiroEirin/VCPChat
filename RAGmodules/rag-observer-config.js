@@ -11,19 +11,16 @@ class RAGObserverConfig {
         this.isConnecting = false;
     }
 
-    // 读取settings（从全局变量）
+    // 从URL查询参数读取settings
     loadSettings() {
-        if (window.VCP_SETTINGS) {
-            this.settings = window.VCP_SETTINGS;
-            return this.settings;
-        }
-        // 如果无法加载，提供默认值
-        console.warn('未找到VCP_SETTINGS，使用默认配置');
-        return {
-            vcpLogUrl: 'ws://127.0.0.1:5890',
-            vcpLogKey: '',
-            currentThemeMode: 'dark'
+        const params = new URLSearchParams(window.location.search);
+        const settings = {
+            vcpLogUrl: params.get('vcpLogUrl') || 'ws://127.0.0.1:5890',
+            vcpLogKey: params.get('vcpLogKey') || ''
         };
+        this.settings = settings;
+        console.log('Loaded settings from URL:', this.settings);
+        return this.settings;
     }
 
     // 应用主题
@@ -43,8 +40,7 @@ class RAGObserverConfig {
 
         const settings = this.loadSettings();
         
-        // 应用主题 (只在首次连接或设置变化时应用，但这里保持原样，因为它幂等)
-        this.applyTheme(settings.currentThemeMode);
+        // Theme is now handled by the async DOMContentLoaded listener.
         
         // 获取连接信息
         const wsUrl = settings.vcpLogUrl || 'ws://127.0.0.1:5890';
@@ -78,8 +74,8 @@ class RAGObserverConfig {
         this.wsConnection.onmessage = (event) => {
             try {
                 const data = JSON.parse(event.data);
-                // 检查是否为RAG或元思考链的详细信息
-                if (data.type === 'RAG_RETRIEVAL_DETAILS' || data.type === 'META_THINKING_CHAIN') {
+                // 检查是否为RAG、元思考链或Agent私聊预览的详细信息
+                if (data.type === 'RAG_RETRIEVAL_DETAILS' || data.type === 'META_THINKING_CHAIN' || data.type === 'AGENT_PRIVATE_CHAT_PREVIEW') {
                     if (window.startSpectrumAnimation) {
                         window.startSpectrumAnimation(3000); // 动画持续3秒
                     }
@@ -119,7 +115,8 @@ class RAGObserverConfig {
         }
     }
 
-    // 定期检查settings变化（可选功能）
+    // watchSettings is deprecated in favor of the onThemeUpdated IPC listener
+    /*
     watchSettings(interval = 5000) {
         setInterval(() => {
             const newSettings = this.loadSettings();
@@ -130,12 +127,54 @@ class RAGObserverConfig {
             }
         }, interval);
     }
+    */
 }
 
 // 页面加载时自动初始化
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', async () => {
     const config = new RAGObserverConfig();
+
+    // Initialize and apply theme first
+    if (window.electronAPI) {
+        // Listen for subsequent theme updates from the main process
+        window.electronAPI.onThemeUpdated((theme) => {
+            console.log(`RAG Observer: Theme updated to ${theme}`);
+            config.applyTheme(theme);
+        });
+        
+        // Get and apply the initial theme
+        try {
+            const theme = await window.electronAPI.getCurrentTheme();
+            console.log(`RAG Observer: Initial theme set to ${theme}`);
+            config.applyTheme(theme || 'dark');
+        } catch (error) {
+            console.error('RAG Observer: Failed to get initial theme, falling back to dark.', error);
+            config.applyTheme('dark');
+        }
+    } else {
+        // Fallback for non-electron environments if needed
+        const params = new URLSearchParams(window.location.search);
+        const theme = params.get('currentThemeMode') || 'dark';
+        config.applyTheme(theme);
+    }
+
+    // Now connect to WebSocket
     config.autoConnect();
-    // 启动设置监听（每5秒检查一次主题变化）
-    config.watchSettings(5000);
+
+    // --- Custom Title Bar Listeners ---
+    const minimizeBtn = document.getElementById('minimize-btn');
+    const maximizeBtn = document.getElementById('maximize-btn');
+    const closeBtn = document.getElementById('close-btn');
+
+    minimizeBtn.addEventListener('click', () => {
+        if (window.electronAPI) window.electronAPI.minimizeWindow();
+    });
+
+    maximizeBtn.addEventListener('click', () => {
+        if (window.electronAPI) window.electronAPI.maximizeWindow();
+    });
+
+    closeBtn.addEventListener('click', () => {
+        window.close();
+    });
 });
