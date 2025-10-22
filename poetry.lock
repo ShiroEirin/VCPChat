@@ -965,6 +965,21 @@ client = ["requests (>=2.21.0)", "websocket-client (>=0.54.0)"]
 docs = ["sphinx"]
 
 [[package]]
+name = "rust_audio_resampler"
+version = "0.1.0"
+description = ""
+optional = false
+python-versions = "*"
+groups = ["main"]
+files = [
+    {file = "rust_audio_resampler-0.1.0-cp313-cp313-win_amd64.whl", hash = "sha256:43f77b2d636be6aae01c25fb2d803c430fc8d493b31ee2fd88f58c2dc23995d3"},
+]
+
+[package.source]
+type = "file"
+url = "audio_engine/rust_audio_resampler-0.1.0-cp313-cp313-win_amd64.whl"
+
+[[package]]
 name = "scipy"
 version = "1.9.3"
 description = "Fundamental algorithms for scientific computing in Python"
@@ -1396,4 +1411,4 @@ testing = ["coverage[toml]", "zope.event", "zope.testing"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.8"
-content-hash = "1615826c47558bc57ed952588636611d6f07b672f3f91d5da5c56f039e74a36b"
+content-hash = "a17a504c6c38df14de5ed9f7fecee76296fe30eb61b70c345df94e964fa4734b"
