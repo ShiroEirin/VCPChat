@@ -918,17 +918,14 @@ function prepareGroupSettingsDOM() {
         }
     }
      // Ensure createNewGroupBtn has its text updated
-    if (createNewAgentBtn) {
-        createNewAgentBtn.textContent = '创建 Agent';
-        createNewAgentBtn.style.width = 'calc(50% - 5px)'; // Adjust width to make space
-        createNewAgentBtn.style.marginRight = '5px';
-    }
-    if (createNewGroupBtn) {
-        createNewGroupBtn.textContent = '创建 Group';
-        console.log('[Renderer prepareGroupSettingsDOM] createNewGroupBtn textContent set to:', createNewGroupBtn.textContent);
-        createNewGroupBtn.style.display = 'inline-block'; // Make it visible
-        createNewGroupBtn.style.width = 'calc(50% - 5px)';
-    }
+     if (createNewAgentBtn) {
+         createNewAgentBtn.textContent = '创建 Agent';
+     }
+     if (createNewGroupBtn) {
+         createNewGroupBtn.textContent = '创建 Group';
+         console.log('[Renderer prepareGroupSettingsDOM] createNewGroupBtn textContent set to:', createNewGroupBtn.textContent);
+         createNewGroupBtn.style.display = 'inline-block'; // Make it visible
+     }
 }
 
 
@@ -961,10 +958,10 @@ async function loadAndApplyGlobalSettings() {
         // --- End Load Network Notes Paths ---
 
         // Load smooth streaming settings
-        document.getElementById('enableAgentBubbleTheme').checked = globalSettings.enableAgentBubbleTheme === true;
-        document.getElementById('enableSmoothStreaming').checked = globalSettings.enableSmoothStreaming === true;
-        document.getElementById('minChunkBufferSize').value = globalSettings.minChunkBufferSize !== undefined ? globalSettings.minChunkBufferSize : 1;
-        document.getElementById('smoothStreamIntervalMs').value = globalSettings.smoothStreamIntervalMs !== undefined ? globalSettings.smoothStreamIntervalMs : 25;
+        document.getElementById('enableAgentBubbleTheme').checked = globalSettings.enableAgentBubbleTheme !== false; // Default to true
+        document.getElementById('enableSmoothStreaming').checked = globalSettings.enableSmoothStreaming === true; // Default to false
+        document.getElementById('minChunkBufferSize').value = globalSettings.minChunkBufferSize !== undefined ? globalSettings.minChunkBufferSize : 16;
+        document.getElementById('smoothStreamIntervalMs').value = globalSettings.smoothStreamIntervalMs !== undefined ? globalSettings.smoothStreamIntervalMs : 100;
 
 
         if (globalSettings.userAvatarUrl && userAvatarPreview) {
@@ -1235,8 +1232,8 @@ function setupEventListeners() {
             // userAvatarUrl and userAvatarCalculatedColor are handled by saveUserAvatar
             enableAgentBubbleTheme: document.getElementById('enableAgentBubbleTheme').checked,
             enableSmoothStreaming: document.getElementById('enableSmoothStreaming').checked,
-            minChunkBufferSize: parseInt(document.getElementById('minChunkBufferSize').value, 10) || 1,
-            smoothStreamIntervalMs: parseInt(document.getElementById('smoothStreamIntervalMs').value, 10) || 25,
+            minChunkBufferSize: parseInt(document.getElementById('minChunkBufferSize').value, 10) || 16,
+            smoothStreamIntervalMs: parseInt(document.getElementById('smoothStreamIntervalMs').value, 10) || 100,
             // assistantEnabled is no longer part of the form, it's managed by the toggle button
             assistantAgent: assistantAgentSelect.value,
             enableDistributedServer: document.getElementById('enableDistributedServer').checked,
