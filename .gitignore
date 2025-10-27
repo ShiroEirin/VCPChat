@@ -8,6 +8,20 @@ yarn-error.log*
 
 # Poetry 虚拟环境
 .venv/
+VCPDistributedServer/venv*/
+**/venv*/
+
+# Python 虚拟环境
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
 
 # 用户数据和缓存
 AppData/
@@ -62,6 +76,13 @@ build/
 .next/
 out/
 /public/assets
+
+# 大型二进制工具文件
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
 
 # 系统文件
 run_silent.vbs
