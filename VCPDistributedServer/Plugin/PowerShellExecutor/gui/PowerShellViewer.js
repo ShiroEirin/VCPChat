@@ -1,46 +1,27 @@
 // PowerShellViewer.js
 
-// xterm.js 和 FitAddon 现在通过 <script> 标签在 PowerShellViewer.html 中全局引入
-// 因此不再需要使用 require()
-
 // --- 终端初始化 ---
 const terminalContainer = document.getElementById('terminal-container');
+const commandInput = document.getElementById('command-input');
+const sendButton = document.getElementById('send-button');
 
 // 创建 FitAddon 实例
-// 当通过 <script> 标签加载时, 构造函数位于 FitAddon.FitAddon
 const fitAddon = new FitAddon.FitAddon();
 
-// 创建终端实例
+// 创建一个函数来获取CSS变量值
+function getCssVariable(variable) {
+    return getComputedStyle(document.body).getPropertyValue(variable).trim();
+}
+
 const term = new Terminal({
     cursorBlink: true,
     fontSize: 14,
     fontFamily: 'Consolas, "Courier New", monospace',
-    theme: {
-        background: '#1e1e2e', // Catppuccin Macchiato Base
-        foreground: '#cdd6f4', // Text
-        cursor: '#f5e0dc',     // Rosewater
-        selectionBackground: '#585b70', // Surface2
-        black: '#45475a',
-        red: '#f38ba8',
-        green: '#a6e3a1',
-        yellow: '#f9e2af',
-        blue: '#89b4fa',
-        magenta: '#f5c2e7',
-        cyan: '#89dceb',
-        white: '#a6adc8',
-        brightBlack: '#585b70',
-        brightRed: '#f38ba8',
-        brightGreen: '#a6e3a1',
-        brightYellow: '#f9e2af',
-        brightBlue: '#89b4fa',
-        brightMagenta: '#f5c2e7',
-        brightCyan: '#89dceb',
-        brightWhite: '#cdd6f4'
-    },
-    // 允许透明度，以便背景色生效
+    theme: {},
     allowTransparency: true,
-    // 启用 Windows 的 Ctrl+C/Ctrl+V
-    windowsMode: true
+    windowsMode: true,
+    // 禁用内置的复制行为，我们将通过Electron API手动处理
+    copyOnSelect: false 
 });
 
 // 将 FitAddon 加载到终端实例中
@@ -51,50 +32,134 @@ term.open(terminalContainer);
 
 // --- 功能函数 ---
 
-/**
- * 使终端尺寸适应其容器的大小
- */
 function fitTerminal() {
     try {
         fitAddon.fit();
+        // 在调整前端后，立即将新的尺寸发送到后端
+        if (window.electronAPI) {
+            window.electronAPI.send('powershell-resize', { cols: term.cols, rows: term.rows });
+        }
     } catch (e) {
         console.error("Failed to fit terminal:", e);
     }
 }
 
-// --- IPC 通信 ---
+function sendCommand() {
+    const command = commandInput.value;
+    if (command.trim() && window.electronAPI) {
+        term.write(command + '\r\n');
+        window.electronAPI.send('powershell-command', command);
+        commandInput.value = '';
+        commandInput.focus();
+    }
+}
 
-// 检查 preload 脚本是否成功注入了 API
+// --- IPC 与事件监听 ---
+
 if (window.electronAPI) {
-    // 监听来自后端的终端数据流
+    // --- 数据、清屏与主题 ---
+    // 前端现在是一个纯粹的渲染器，所有状态和内容都由后端主导。
     window.electronAPI.on('powershell-data', (data) => {
-        // 将收到的数据写入前端终端
-        term.write(data);
+        // 后端现在负责所有数据清理，前端只需直接写入即可。
+        if (data) {
+            term.write(data);
+        }
     });
 
-    // 监听后端发送的清除终端的指令
     window.electronAPI.on('powershell-clear', () => {
         term.clear();
     });
+    window.electronAPI.on('theme-init', ({ themeName }) => {
+        // 恢复主程序使用的标准主题切换逻辑：
+        // 当 themeName 为 'light' 时，添加 'light-theme' 类；否则，移除该类以应用默认的深色主题。
+        document.body.classList.toggle('light-theme', themeName === 'light');
+
+        // 延迟执行以确保CSS变量已应用
+        setTimeout(() => {
+            term.options.theme = {
+                background: 'transparent',
+                foreground: getCssVariable('--primary-text'),
+                cursor: getCssVariable('--highlight-text'),
+                selectionBackground: getCssVariable('--accent-bg'),
+                black: getCssVariable('--tertiary-bg'),
+                red: getCssVariable('--danger-color'),
+                green: getCssVariable('--success-color'),
+                yellow: getCssVariable('--quoted-text'),
+                blue: getCssVariable('--button-bg'),
+                magenta: getCssVariable('--highlight-text'),
+                cyan: getCssVariable('--secondary-text'),
+                white: getCssVariable('--primary-text'),
+                brightBlack: getCssVariable('--secondary-text'),
+                brightRed: getCssVariable('--danger-hover-bg'),
+                brightGreen: getCssVariable('--success-color'),
+                brightYellow: getCssVariable('--quoted-text'),
+                brightBlue: getCssVariable('--button-hover-bg'),
+                brightMagenta: getCssVariable('--highlight-text'),
+                brightCyan: getCssVariable('--secondary-text'),
+                brightWhite: getCssVariable('--primary-text')
+            };
+            term.refresh(0, term.rows - 1);
+        }, 100);
+    });
+
+    // --- 原生复制逻辑 ---
+    // 监听右键点击事件，用于复制
+    terminalContainer.addEventListener('contextmenu', (e) => {
+        e.preventDefault(); // 阻止默认的右键菜单
+        const selection = term.getSelection();
+        if (selection) {
+            window.electronAPI.send('copy-to-clipboard', selection);
+        }
+    });
+
+    // 监听键盘复制事件 (Ctrl+C)
+    term.attachCustomKeyEventHandler((arg) => {
+        if (arg.ctrlKey && arg.code === 'KeyC' && arg.type === 'keydown') {
+            const selection = term.getSelection();
+            if (selection) {
+                window.electronAPI.send('copy-to-clipboard', selection);
+                return false; // 阻止事件进一步传播，避免终端解释为中断信号
+            }
+        }
+        return true;
+    });
+
 } else {
-    console.error('Fatal Error: electronAPI not found. Preload script might have failed.');
-    term.writeln('Error: Could not connect to the backend. Please check the console for details.');
+    console.error('Fatal Error: electronAPI not found.');
+    term.writeln('Error: Could not connect to the backend.');
 }
 
-// --- 初始化和事件监听 ---
-
-// 页面加载完成后，立即调整一次终端尺寸
+// --- 窗口与输入监听 ---
 window.addEventListener('DOMContentLoaded', () => {
     fitTerminal();
-    // 可以在这里向后端发送一个信号，表示GUI已准备就绪
     if (window.electronAPI) {
         window.electronAPI.send('powershell-gui-ready');
     }
+
+    // --- 自定义标题栏事件监听 ---
+    const minimizeBtn = document.getElementById('minimize-btn');
+    const maximizeBtn = document.getElementById('maximize-btn');
+    const closeBtn = document.getElementById('close-btn');
+
+    minimizeBtn.addEventListener('click', () => {
+        if (window.electronAPI) window.electronAPI.minimizeWindow();
+    });
+
+    maximizeBtn.addEventListener('click', () => {
+        if (window.electronAPI) window.electronAPI.maximizeWindow();
+    });
+
+    closeBtn.addEventListener('click', () => {
+        if (window.electronAPI) window.electronAPI.closeWindow();
+    });
 });
-
-// 当窗口大小改变时，重新调整终端尺寸
-window.addEventListener('resize', fitTerminal);
-
-// 示例：显示欢迎信息
-term.writeln('Welcome to VCP PowerShell Terminal!');
-term.writeln('Waiting for AI commands...');
+window.addEventListener('resize', () => setTimeout(fitTerminal, 0));
+sendButton.addEventListener('click', sendCommand);
+commandInput.addEventListener('keydown', (event) => {
+    // 当用户按下 Enter 键但没有同时按下 Shift 键时，发送命令
+    if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault(); // 阻止默认的 Enter 行为（例如，在 textarea 中换行）
+        sendCommand();
+    }
+    // Shift+Enter 的默认行为就是在 textarea 中换行，所以我们不需要为它编写特殊逻辑
+});

@@ -426,7 +426,13 @@ class PluginManager {
 
     // 新增：获取所有静态占位符值
     getAllPlaceholderValues() {
-        return new Map(this.staticPlaceholderValues);
+        const valuesMap = new Map();
+        for (const [key, value] of this.staticPlaceholderValues.entries()) {
+            // Ensure that the returned map contains only string values,
+            // consistent with the main server's expectations.
+            valuesMap.set(key, String(value));
+        }
+        return valuesMap;
     }
 
     // 新增：关闭所有插件
