@@ -13,6 +13,7 @@
                    connect-src * ws: wss:;">
     <title>VCPChat</title>
     <link rel="stylesheet" href="style.css">
+    <link rel="stylesheet" href="Flowlockmodules/flowlock.css">
     <link rel="stylesheet" href="vendor/katex.min.css" crossorigin="anonymous">
     <script defer src="vendor/katex.min.js" crossorigin="anonymous"></script>
     <script defer src="vendor/auto-render.min.js" crossorigin="anonymous"></script>
@@ -243,9 +244,6 @@
                             <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.49 6-3.31 6-6.72h-1.7z"></path>
                         </svg>
                     </button>
-                    <button id="voiceChatBtn" class="header-button" title="语音聊天" style="margin-right: 5px; display: none;">
-                        <span style="vertical-align: middle; margin-left: 5px;">📞 语音聊天</span>
-                    </button>
                 </div>
             </header>
             <div class="chat-messages-container">
@@ -461,6 +459,14 @@
                     </small>
                 </div>
 
+                <div class="form-group" style="margin-bottom: 20px;">
+                    <label for="flowlockContinueDelay">心流锁续写延迟 (秒):</label>
+                    <input type="number" id="flowlockContinueDelay" name="flowlockContinueDelay" min="1" max="300" step="1" value="5" style="width: 80px;">
+                    <small style="color: var(--text-secondary); margin-top: 5px; display: block;">
+                        提示：AI完成一次续写后，等待指定秒数再开始下一次续写。
+                    </small>
+                </div>
+
                 <hr style="border: none; border-top: 1px solid var(--border-color); margin: 20px 0;">
 
                 <div class="form-group-inline" style="justify-content: space-between; align-items: center; margin-bottom: 15px;">
@@ -590,6 +596,8 @@
     <script type="module" src="modules/renderer/contentProcessor.js"></script>
     <script type="module" src="modules/renderer/messageContextMenu.js"></script>
     <script type="module" src="modules/event-listeners.js"></script>
+    <script src="Flowlockmodules/flowlock.js"></script>
+    <script src="Flowlockmodules/flowlock-integration.js"></script>
     <script type="module" src="renderer.js" defer></script>
 
     <!-- Model Selection Modal -->
