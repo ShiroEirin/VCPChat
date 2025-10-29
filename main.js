@@ -146,6 +146,7 @@ function startAudioEngine() {
             return;
         }
 
+        const startTime = Date.now();
         const scriptPath = path.join(__dirname, 'audio_engine', 'main.py');
         console.log(`[Main] Starting Python Audio Engine from: ${scriptPath}`);
 

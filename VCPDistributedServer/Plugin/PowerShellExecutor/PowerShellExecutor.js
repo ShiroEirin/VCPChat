@@ -1,4 +1,4 @@
-const pty = require('node-pty');
+const pty = require('@karinjs/node-pty');
 const os = require('os');
 const { spawn } = require('child_process');
 const path = require('path');
