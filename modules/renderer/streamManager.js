@@ -170,6 +170,22 @@ async function saveHistoryForContext(context, history) {
 function applyStreamingPreprocessors(text) {
     if (!text) return '';
     
+    // 🟢 在流式渲染前也修复一次（双重保险）
+    // 因为流式输出可能绕过 preprocessFullContent
+    if (refs.emoticonUrlFixer) {
+        // Markdown 语法
+        text = text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, url) => {
+            const fixedUrl = refs.emoticonUrlFixer.fixEmoticonUrl(url);
+            return `![${alt}](${fixedUrl})`;
+        });
+        
+        // HTML 标签
+        text = text.replace(/<img([^>]*?)src=["']([^"']+)["']([^>]*?)>/gi, (match, before, url, after) => {
+            const fixedUrl = refs.emoticonUrlFixer.fixEmoticonUrl(url);
+            return `<img${before}src="${fixedUrl}"${after}>`;
+        });
+    }
+    
     // 🟢 重置 lastIndex（全局正则）
     SPEAKER_TAG_REGEX.lastIndex = 0;
     NEWLINE_AFTER_CODE_REGEX.lastIndex = 0;
@@ -312,24 +328,32 @@ function renderStreamFrame(messageId) {
                     requestAnimationFrame(() => toEl.focus());
                 }
                 
-                // 🟢 保留表情包修复的状态标记和事件处理器
+                // 🟢 简化图片逻辑：只保留状态，不再做 URL 对比
                 if (fromEl.tagName === 'IMG') {
+                    // 保留加载状态标记
                     if (fromEl.dataset.emoticonHandlerAttached) {
                         toEl.dataset.emoticonHandlerAttached = 'true';
                     }
                     if (fromEl.dataset.emoticonFixAttempted) {
                         toEl.dataset.emoticonFixAttempted = 'true';
                     }
-                    // Preserve handlers to continue the loading/error process
+                    
+                    // 保留事件处理器
                     if (fromEl.onerror && !toEl.onerror) {
                         toEl.onerror = fromEl.onerror;
                     }
                     if (fromEl.onload && !toEl.onload) {
                         toEl.onload = fromEl.onload;
                     }
-                    // Preserve visibility style to prevent flicker on re-renders
+                    
+                    // 保留可见性状态
                     if (fromEl.style.visibility) {
                         toEl.style.visibility = fromEl.style.visibility;
+                    }
+                    
+                    // 🟢 如果图片已成功加载，不要更新它
+                    if (fromEl.complete && fromEl.naturalWidth > 0) {
+                        return false;
                     }
                 }
                 
@@ -861,8 +885,8 @@ export async function finalizeStreamedMessage(messageId, finishReason, context) 
                     }
                 }, 0);
 
-                // Step 3: Process animations
-                if (globalSettings.enableAgentBubbleTheme && refs.processAnimationsInContent) {
+                // Step 3: Process animations, scripts, and 3D scenes
+                if (refs.processAnimationsInContent) {
                     refs.processAnimationsInContent(contentDiv);
                 }
             }
