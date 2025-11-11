@@ -14,3 +14,15 @@ node_modules/
 /public/assets
 
 **/.DS_Store
+
+# IDE and tool directories
+.claude/
+.spec-workflow/
+
+# Virtual environments
+**/venv*/
+**/venv312/
+
+# Build output directories
+bin/
+nul
