@@ -319,7 +319,7 @@ import { setupEventListeners } from './modules/event-listeners.js';
             window.notificationRenderer.updateVCPLogStatus(statusUpdate, vcpLogConnectionStatusDiv);
         }
     });
-    window.electronAPI.onVCPLogMessage((logData, originalRawMessage) => {
+    window.electronAPI.onVCPLogMessage((logData) => {
         if (window.notificationRenderer) {
             const computedStyle = getComputedStyle(document.body);
             const themeColors = {
@@ -330,7 +330,8 @@ import { setupEventListeners } from './modules/event-listeners.js';
                 primaryText: computedStyle.getPropertyValue('--primary-text').trim(),
                 secondaryText: computedStyle.getPropertyValue('--secondary-text').trim()
             };
-            window.notificationRenderer.renderVCPLogNotification(logData, originalRawMessage, notificationsListUl, themeColors);
+            // 修复：只传递一个 logData 参数，第二个参数显式传递 null，以匹配 preload 定义
+            window.notificationRenderer.renderVCPLogNotification(logData, null, notificationsListUl, themeColors);
         }
     });
 
@@ -1468,9 +1469,13 @@ async function loadAndApplyGlobalSettings() {
         document.getElementById('contextSanitizerDepth').value = globalSettings.contextSanitizerDepth !== undefined ? globalSettings.contextSanitizerDepth : 2;  
         // 同时更新深度容器的显示状态  
         const contextSanitizerDepthContainer = document.getElementById('contextSanitizerDepthContainer');  
-        if (contextSanitizerDepthContainer) {  
-            contextSanitizerDepthContainer.style.display = globalSettings.enableContextSanitizer === true ? 'block' : 'none';  
+        if (contextSanitizerDepthContainer) {
+            contextSanitizerDepthContainer.style.display = globalSettings.enableContextSanitizer === true ? 'block' : 'none';
         }
+
+        // Load AI message button setting
+        document.getElementById('enableAiMessageButtons').checked = globalSettings.enableAiMessageButtons !== false; // Default to true
+
         // Load filter mode setting (migrate from old doNotDisturbLogMode if exists)
         let filterEnabled = globalSettings.filterEnabled;
         if (filterEnabled === undefined) {

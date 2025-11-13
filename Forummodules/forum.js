@@ -584,7 +584,10 @@ function renderWaterfall(postsToRender) {
     const sorted = [...postsToRender].sort((a, b) => {
         if (a.title.includes('[置顶]') && !b.title.includes('[置顶]')) return -1;
         if (!a.title.includes('[置顶]') && b.title.includes('[置顶]')) return 1;
-        return new Date(b.lastReplyAt || b.timestamp) - new Date(a.lastReplyAt || a.timestamp);
+        // Use the new robust date parser. Fallback to epoch start if date is invalid.
+        const dateB = parseForumDate(b.mtime || b.lastReplyAt || b.timestamp) || new Date(0);
+        const dateA = parseForumDate(a.mtime || a.lastReplyAt || a.timestamp) || new Date(0);
+        return dateB - dateA;
     });
 
     sorted.forEach((post, index) => {
@@ -600,8 +603,55 @@ function createPostCard(post, index) {
     const delay = index < 20 ? index * 0.05 : 0;
     el.style.animationDelay = `${delay}s`;
     
-    const hue = post.author.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0) % 360;
-    const avatarColor = `hsl(${hue}, 70%, 60%)`;
+    // Backend returns lastReplyBy and lastReplyAt
+    const displayDate = post.mtime || post.lastReplyAt || post.timestamp;
+    const hasReply = post.lastReplyAt && post.timestamp && post.lastReplyAt !== post.timestamp;
+    
+    // Use lastReplyBy from backend API
+    const lastReplier = post.lastReplyBy;
+    const hasNewReplier = hasReply && lastReplier && lastReplier !== post.author;
+
+    let metaHTML = '';
+
+    if (hasNewReplier) {
+        const authorHue = post.author.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0) % 360;
+        const authorAvatarColor = `hsl(${authorHue}, 70%, 60%)`;
+        const replierHue = lastReplier.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0) % 360;
+        const replierAvatarColor = `hsl(${replierHue}, 70%, 60%)`;
+
+        metaHTML = `
+            <div class="author-info-with-time">
+                <div class="author-avatar loading-avatar" style="background: ${authorAvatarColor}" data-author="${escapeHtml(post.author)}">${post.author.slice(0,1).toUpperCase()}</div>
+                <div class="time-info">
+                    <div style="font-size: 0.8em; opacity: 0.7;">发帖于</div>
+                    <div>${formatDate(post.timestamp)}</div>
+                </div>
+            </div>
+            <div class="meta-separator"></div>
+            <div class="author-info-with-time">
+                <div class="author-avatar loading-avatar" style="background: ${replierAvatarColor}" data-author="${escapeHtml(lastReplier)}">${lastReplier.slice(0,1).toUpperCase()}</div>
+                <div class="time-info">
+                    <div style="font-size: 0.8em; opacity: 0.7;">最后回复</div>
+                    <div>${formatDate(displayDate)}</div>
+                </div>
+            </div>
+        `;
+    } else {
+        const authorHue = post.author.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0) % 360;
+        const authorAvatarColor = `hsl(${authorHue}, 70%, 60%)`;
+        const timestampLabel = hasReply ? '最后回复' : '发帖于';
+
+        metaHTML = `
+            <div class="meta-left">
+                <div class="author-avatar loading-avatar" style="background: ${authorAvatarColor}" data-author="${escapeHtml(post.author)}">${post.author.slice(0,1).toUpperCase()}</div>
+                <span>${escapeHtml(post.author)}</span>
+            </div>
+            <div style="text-align: right;">
+                <div style="font-size: 0.8em; opacity: 0.7;">${timestampLabel}</div>
+                <div>${formatDate(displayDate)}</div>
+            </div>
+        `;
+    }
 
     el.innerHTML = `
         <div class="post-card-header">
@@ -612,18 +662,17 @@ function createPostCard(post, index) {
             点击展开查看详情...
         </div>
         <div class="post-meta">
-            <div class="meta-left">
-                <div class="author-avatar loading-avatar" style="background: ${avatarColor}" data-author="${escapeHtml(post.author)}">${post.author.slice(0,1).toUpperCase()}</div>
-                <span>${escapeHtml(post.author)}</span>
-            </div>
-            <span>${formatDate(post.lastReplyAt || post.timestamp)}</span>
+            ${metaHTML}
         </div>
     `;
 
     el.addEventListener('click', (e) => expandPost(post, el));
     
-    // Async load avatar
-    loadAvatarForElement(el.querySelector('.author-avatar'), post.author);
+    // Async load avatar(s)
+    const avatars = el.querySelectorAll('.author-avatar');
+    avatars.forEach(avatarEl => {
+        loadAvatarForElement(avatarEl, avatarEl.dataset.author);
+    });
     
     return el;
 }
@@ -1200,24 +1249,39 @@ function customAlert(message, title = '提示') {
     });
 }
 
+function parseForumDate(ts) {
+    if (!ts) return null;
+    let d;
+    if (typeof ts === 'string') {
+        // Normalize non-standard timestamps like "2025-11-12T11-57-08.749Z"
+        // by replacing hyphens in the time part with colons.
+        const normalizedTs = ts.replace(/T(\d{2})-(\d{2})-(\d{2})/, 'T$1:$2:$3');
+        d = new Date(normalizedTs);
+
+        // Fallback for other non-standard formats if the above fails
+        if (isNaN(d.getTime())) {
+            // This handles formats like 'YYYY-MM-DD HH:mm:ss' better on some engines
+            d = new Date(ts.replace(/-/g, '/'));
+        }
+    } else {
+        // Assumes it's already a Date object or a valid timestamp number
+        d = new Date(ts);
+    }
+    
+    // If still invalid, return null
+    if (isNaN(d.getTime())) {
+        return null;
+    }
+    return d;
+}
+
 function formatDate(ts) {
     if (!ts) return '';
     try {
-        // Handle various date formats
-        let d;
-        if (typeof ts === 'string') {
-            // Try parsing ISO format first
-            d = new Date(ts);
-            // If invalid, try replacing hyphens with slashes for better compatibility
-            if (isNaN(d.getTime())) {
-                d = new Date(ts.replace(/-/g, '/'));
-            }
-        } else {
-            d = new Date(ts);
-        }
-        
+        const d = parseForumDate(ts);
+
         // Check if date is valid
-        if (isNaN(d.getTime())) {
+        if (!d) {
             console.warn('Invalid date:', ts);
             return String(ts);
         }
@@ -1230,12 +1294,19 @@ function formatDate(ts) {
         if (diff < 86400) return `${Math.floor(diff / 3600)}小时前`;
         if (diff < 86400 * 7) return `${Math.floor(diff / 86400)}天前`;
         
-        // Format as date with time
+        // Format as date with time, including year if it's not the current year.
+        const year = d.getFullYear();
+        const currentYear = now.getFullYear();
         const month = d.getMonth() + 1;
         const day = d.getDate();
         const hours = d.getHours().toString().padStart(2, '0');
         const minutes = d.getMinutes().toString().padStart(2, '0');
-        return `${month}月${day}日 ${hours}:${minutes}`;
+        
+        if (year !== currentYear) {
+            return `${year}年${month}月${day}日 ${hours}:${minutes}`;
+        } else {
+            return `${month}月${day}日 ${hours}:${minutes}`;
+        }
     } catch (e) {
         console.error('Date formatting error:', e, ts);
         return String(ts);
