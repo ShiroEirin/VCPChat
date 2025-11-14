@@ -6,7 +6,7 @@ const DIARY_RENDER_DEBOUNCE_DELAY = 1000; // ms, potentially longer for diary if
 const enhancedRenderDebounceTimers = new WeakMap(); // For debouncing prettify calls
 
 import { avatarColorCache, getDominantAvatarColor } from './renderer/colorUtils.js';
-import { initializeImageHandler, setContentAndProcessImages, clearImageState, clearAllImageStates } from './renderer/imageHandler.js';
+import { initializeImageHandler, setContentAndProcessImages } from './renderer/imageHandler.js';
 import { processAnimationsInContent, cleanupAnimationsInContent } from './renderer/animation.js';
 import { createMessageSkeleton } from './renderer/domBuilder.js';
 import * as streamManager from './renderer/streamManager.js';
@@ -500,12 +500,14 @@ function deIndentHtml(text) {
     return lines.map(line => {
         if (line.trim().startsWith('```')) {
             inFence = !inFence;
+            return line;
         }
-        // If we are not in a fenced block, and a line is indented and looks like an HTML tag,
-        // remove the leading whitespace. This is the key fix.
-        // The regex now specifically targets indented `<p>` and `<div>` tags,
-        // which are common block-level elements that can be misinterpreted as code blocks.
-        // It is case-insensitive and handles tags spanning multiple lines.
+        
+        // 🟢 新增：如果行内包含 <img>，不要拆分它
+        if (!inFence && line.includes('<img')) {
+            return line; // 保持原样
+        }
+        
         if (!inFence && /^\s+<(!|[a-zA-Z])/.test(line)) {
             return line.trimStart();
         }
@@ -726,7 +728,6 @@ function removeMessageById(messageId, saveHistory = false) {
             }
         }
     }
-    clearImageState(messageId); // Clean up image state for the deleted message
 }
 
 function clearChat() {
@@ -742,7 +743,6 @@ function clearChat() {
         mainRendererReferences.chatMessagesDiv.innerHTML = '';
     }
     mainRendererReferences.currentChatHistoryRef.set([]); // Clear the history array via its ref
-    clearAllImageStates(); // Clear all image loading states
 }
 
 
