@@ -21,7 +21,7 @@ export function setupEventListeners(deps) {
         refs,
 
         // Modules and helper functions
-        uiHelperFunctions, chatManager, itemListManager, settingsManager, uiManager,
+        uiHelperFunctions, chatManager, itemListManager, settingsManager, uiManager, topicListManager,
         getCroppedFile, setCroppedFile, updateAttachmentPreview, filterAgentList,
         addNetworkPathInput
     } = deps;
@@ -731,6 +731,10 @@ export function setupEventListeners(deps) {
                     await chatManager.selectTopic(result.topicId);
                 }
 
+              // 关键修复：在切换话题后，强制刷新话题列表UI
+                if (topicListManager && topicListManager.loadTopicList) {
+                    await topicListManager.loadTopicList();
+                }
                 uiHelperFunctions.showToastNotification(
                     locked ? '已创建新话题（已锁定）' : '已创建新话题（未锁定，AI可查看）',
                     'success'
@@ -1014,33 +1018,20 @@ export function setupEventListeners(deps) {
             handleContinueWriting(currentInputText);
         }
 
-<<<<<<< HEAD
-        if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'n' || e.key === 'N')) {
             e.preventDefault();
-            console.log('[快捷键] 执行快速新建话题');
-=======
-        if ((e.ctrlKey || e.metaKey) && (e.key === 'n' || e.key === 'N')) {
-            e.preventDefault();
->>>>>>> 8c9ce4435fbfeccc93de623308d4804cab5054f1
-            
+
             const currentSelectedItem = refs.currentSelectedItem.get();
             if (!currentSelectedItem.id) {
                 uiHelperFunctions.showToastNotification('请先选择一个Agent', 'warning');
                 return;
             }
-            
+
             if (currentSelectedItem.type !== 'agent') {
                 uiHelperFunctions.showToastNotification('此快捷键仅适用于Agent，不适用于群组', 'warning');
                 return;
             }
-            
-<<<<<<< HEAD
-            // 调用chatManager的创建新话题功能
-            if (chatManager && chatManager.createNewTopicForItem) {
-                chatManager.createNewTopicForItem(currentSelectedItem.id, currentSelectedItem.type);
-            } else {
-                uiHelperFunctions.showToastNotification('无法创建新话题：功能不可用', 'error');
-=======
+
             // 检查是否按下 Shift 键
             if (e.shiftKey) {
                 // Ctrl/Command + Shift + N: 创建未上锁的话题
@@ -1054,13 +1045,10 @@ export function setupEventListeners(deps) {
                 } else {
                     uiHelperFunctions.showToastNotification('无法创建新话题：功能不可用', 'error');
                 }
->>>>>>> 8c9ce4435fbfeccc93de623308d4804cab5054f1
             }
         }
     });
 
-<<<<<<< HEAD
-=======
     // 监听来自主进程的全局快捷键触发的创建未锁定话题事件
     if (window.electronAPI && window.electronAPI.onCreateUnlockedTopic) {
         window.electronAPI.onCreateUnlockedTopic(() => {
@@ -1077,8 +1065,6 @@ export function setupEventListeners(deps) {
             createNewTopicWithLockStatus(currentSelectedItem, false);
         });
     }
-
->>>>>>> 8c9ce4435fbfeccc93de623308d4804cab5054f1
     if (seamFixer && notificationsSidebar) {
         const setSeamFixerWidth = () => {
             const sidebarWidth = notificationsSidebar.getBoundingClientRect().width;
