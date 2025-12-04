@@ -9,6 +9,8 @@ assets/wallpaper/
 
 node_modules/
 
+.claude/
+
 .env
 
 /public/assets
