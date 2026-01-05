@@ -87,6 +87,7 @@
     white-space: pre-wrap !important; /* Restore: Allow wrapping but preserve whitespace */
     word-break: break-all !important; /* Restore: Break long strings */
     transition: all 0.4s ease-in-out; /* Add transition for smooth hover effect */
+    will-change: transform; /* 优化：工具气泡通常包含动画，提升为独立层 */
 }
 
 /* Animated Border for VCP ToolUse */
@@ -231,6 +232,7 @@
     font-size: 1em !important;
     white-space: normal !important; /* Allow text to wrap naturally */
     word-break: break-word !important;
+    will-change: transform; /* 优化：日记气泡提升为独立层 */
 }
 
 /* Remove extra spacing in diary content caused by markdown paragraphs */
@@ -645,6 +647,7 @@ body.light-theme {
     width: fit-content;
     max-width: 95%;
     transition: background 0.3s, color 0.3s, border-color 0.3s, box-shadow 0.3s; /* Add transition for smooth theme change */
+    will-change: transform; /* 优化：结果气泡提升为独立层 */
 }
 
 .vcp-tool-result-bubble::before {
@@ -1000,16 +1003,10 @@ body:not(.light-theme) .mermaid-error {
 
 
 /* --- Stream Fade-in Animation --- */
-/* 新节点的滑入动画（保持原样） */
-.vcp-stream-element-fade-in {
-    animation: vcp-stream-fade-in 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-/* 新增：内容增长的脉冲动画 */
-.vcp-stream-content-pulse {
-    animation: vcp-content-pulse 0.3s ease-out;
-}
-
+/*
+ * 统一 AI 内容块流式渐入动画
+ * 使用 translateX(20px) 实现你记忆中的横向滑入感
+ */
 @keyframes vcp-stream-fade-in {
     from {
         opacity: 0;
@@ -1026,17 +1023,20 @@ body:not(.light-theme) .mermaid-error {
         background-color: transparent;
     }
     50% {
-        background-color: rgba(59, 130, 246, 0.08); /* 轻微的蓝色高亮 */
+        background-color: rgba(59, 130, 246, 0.08);
     }
     100% {
         background-color: transparent;
     }
 }
 
-
-/* Class to apply the animation to newly added stream elements */
 .vcp-stream-element-fade-in {
-  animation: vcp-stream-fade-in 0.5s ease-out forwards;
+    animation: vcp-stream-fade-in 0.5s cubic-bezier(0.25, 0.46, 0.45, 0.94) forwards !important;
+    will-change: opacity, transform;
+}
+
+.vcp-stream-content-pulse {
+    animation: vcp-content-pulse 0.3s ease-out;
 }
 
 
