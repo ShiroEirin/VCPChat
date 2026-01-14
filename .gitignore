@@ -10,7 +10,11 @@ node_modules/
 .claude/
 
 .env
+!audio_engine/.env
 
 /public/assets
 
 **/.DS_Store
+
+# Rust build artifacts
+rust_audio_engine/target/
