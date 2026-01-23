@@ -80,6 +80,7 @@ document.addEventListener('DOMContentLoaded', () => {
        'pop': { '31': 2, '62': 4, '125': 5, '250': 2, '500': -1, '1k': -2, '2k': 0, '4k': 3, '8k': 4, '16k': 5 },
        'rock': { '31': 5, '62': 3, '125': -2, '250': -4, '500': -1, '1k': 2, '2k': 5, '4k': 6, '8k': 7, '16k': 7 },
        'electronic': { '31': 6, '62': 5, '125': 2, '250': 0, '500': -2, '1k': 0, '2k': 3, '4k': 5, '8k': 6, '16k': 7 },
+       'acg_vocal': { '31': 1, '62': 2, '125': -1, '250': 1, '500': -2, '1k': 2, '2k': 5, '4k': 4, '8k': 3, '16k': 2 },
   };
 let isDraggingProgress = false;
 
@@ -813,10 +814,10 @@ class WebNowPlayingAdapter {
     });
 
    // --- WASAPI and Device Control ---
-   const populateDeviceList = async () => {
+   const populateDeviceList = async (forceRefresh = false) => {
        if (!window.electron) return;
        try {
-           const result = await window.electron.invoke('music-get-devices');
+           const result = await window.electron.invoke('music-get-devices', { refresh: forceRefresh });
            if (result.status === 'success' && result.devices) {
                deviceSelect.innerHTML = ''; // Clear existing options
 
@@ -890,7 +891,7 @@ class WebNowPlayingAdapter {
            });
            
            // 切换后重新获取设备列表，以更新“(系统默认)”标记
-           await populateDeviceList();
+           await populateDeviceList(false);
            deviceSelect.value = currentDeviceId === null ? 'default' : currentDeviceId;
        } catch (error) {
            console.error("Error configuring output:", error);
@@ -929,7 +930,8 @@ class WebNowPlayingAdapter {
            'classical': '古典',
            'pop': '流行',
            'rock': '摇滚',
-           'electronic': '电子'
+           'electronic': '电子',
+           'acg_vocal': '萌系ACG'
        };
        for (const preset in eqPresets) {
            const option = document.createElement('option');
@@ -1306,7 +1308,7 @@ class WebNowPlayingAdapter {
     const createSilentAudio = () => {
         const context = new (window.AudioContext || window.webkitAudioContext)();
         const sampleRate = 44100;
-        const duration = 3600; // 增加到 1 小时，防止频繁循环导致的 MediaSession 状态重置
+        const duration = 60; // 60秒足够，且不会导致启动卡顿
         const frameCount = sampleRate * duration;
         const buffer = context.createBuffer(1, frameCount, sampleRate);
         // The buffer is already filled with zeros (silence)
@@ -1346,10 +1348,7 @@ class WebNowPlayingAdapter {
             view.setUint32(offset, dataSize, true); offset += 4;
 
             const pcm = new Int16Array(buffer.length);
-            const channelData = buffer.getChannelData(0);
-            for (let i = 0; i < buffer.length; i++) {
-                pcm[i] = Math.max(-1, Math.min(1, channelData[i])) * 32767;
-            }
+            // Buffer is already silent, no need to loop and fill from channelData
             for (let i = 0; i < pcm.length; i++, offset += 2) {
                 view.setInt16(offset, pcm[i], true);
             }
@@ -1364,6 +1363,9 @@ class WebNowPlayingAdapter {
 
     // --- App Initialization ---
     const init = async () => {
+        if (window.electron) {
+            window.electron.send('music-renderer-ready');
+        }
         visualizerCanvas.width = visualizerCanvas.clientWidth;
         visualizerCanvas.height = visualizerCanvas.clientHeight;
 
@@ -1402,53 +1404,48 @@ class WebNowPlayingAdapter {
         }
        
        // --- New: Populate devices and set initial state ---
-       // 刷新页面后，先让 Python 引擎重新扫描设备，再填充列表
-       await window.electron.invoke('music-configure-output', { device_id: null });
-       await populateDeviceList();
+       // 刷新页面后，直接获取设备列表，不再强制重新扫描以避免启动卡顿
+       populateDeviceList(false);
       createEqBands(); // Create EQ sliders
       populateEqPresets(); // Populate EQ presets
-       const initialDeviceState = await window.electron.invoke('music-get-state');
-       if (initialDeviceState && initialDeviceState.state) {
-           currentDeviceId = initialDeviceState.state.device_id;
-           useWasapiExclusive = initialDeviceState.state.exclusive_mode;
-           deviceSelect.value = currentDeviceId === null ? 'default' : currentDeviceId;
-           wasapiSwitch.checked = useWasapiExclusive;
+       window.electron.invoke('music-get-state').then(initialDeviceState => {
+           if (initialDeviceState && initialDeviceState.state) {
+               currentDeviceId = initialDeviceState.state.device_id;
+               useWasapiExclusive = initialDeviceState.state.exclusive_mode;
+               deviceSelect.value = currentDeviceId === null ? 'default' : currentDeviceId;
+               wasapiSwitch.checked = useWasapiExclusive;
 
-           // Set initial EQ state from engine
-           if (initialDeviceState.state.eq_enabled !== undefined) {
-               eqEnabled = initialDeviceState.state.eq_enabled;
-               eqSwitch.checked = eqEnabled;
-               eqSection.classList.toggle('expanded', eqEnabled);
-           }
-           if (initialDeviceState.state.eq_type !== undefined) {
-               eqTypeSelect.value = initialDeviceState.state.eq_type;
-           }
-           if (initialDeviceState.state.dither_enabled !== undefined) {
-               ditherSwitch.checked = initialDeviceState.state.dither_enabled;
-           }
-           if (initialDeviceState.state.replaygain_enabled !== undefined) {
-               replaygainSwitch.checked = initialDeviceState.state.replaygain_enabled;
-           }
-           if (initialDeviceState.state.eq_bands) {
-                for (const [band, gain] of Object.entries(initialDeviceState.state.eq_bands)) {
-                   const slider = document.getElementById(`eq-${band}`);
-                   if (slider) {
-                       slider.value = gain;
+               // Set initial EQ state from engine
+               if (initialDeviceState.state.eq_enabled !== undefined) {
+                   eqEnabled = initialDeviceState.state.eq_enabled;
+                   eqSwitch.checked = eqEnabled;
+                   eqSection.classList.toggle('expanded', eqEnabled);
+               }
+               if (initialDeviceState.state.eq_type !== undefined) {
+                   eqTypeSelect.value = initialDeviceState.state.eq_type;
+               }
+               if (initialDeviceState.state.dither_enabled !== undefined) {
+                   ditherSwitch.checked = initialDeviceState.state.dither_enabled;
+               }
+               if (initialDeviceState.state.replaygain_enabled !== undefined) {
+                   replaygainSwitch.checked = initialDeviceState.state.replaygain_enabled;
+               }
+               if (initialDeviceState.state.eq_bands) {
+                    for (const [band, gain] of Object.entries(initialDeviceState.state.eq_bands)) {
+                       const slider = document.getElementById(`eq-${band}`);
+                       if (slider) {
+                           slider.value = gain;
+                       }
+                       eqBands[band] = gain;
                    }
-                   eqBands[band] = gain;
+               }
+               // Set initial upsampling state
+               if (initialDeviceState.state.target_samplerate !== undefined) {
+                   targetUpsamplingRate = initialDeviceState.state.target_samplerate || 0;
+                   upsamplingSelect.value = targetUpsamplingRate;
                }
            }
-           // Set initial upsampling state
-           if (initialDeviceState.state.target_samplerate !== undefined) {
-               targetUpsamplingRate = initialDeviceState.state.target_samplerate || 0;
-               upsamplingSelect.value = targetUpsamplingRate;
-           }
-       }
-
-
-        if (window.electron) {
-            window.electron.send('music-renderer-ready');
-        }
+       });
     };
 
     init();
