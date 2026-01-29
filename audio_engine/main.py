@@ -64,7 +64,7 @@ class AudioEngine:
         self.fft_size = 2048  # FFT窗口大小, for better low-freq resolution
         self.hanning_window = np.hanning(self.fft_size) # 性能优化：预计算汉宁窗
         self.fft_update_interval = 1.0 / 20.0  # B3: 更新频率降至20Hz，降低前端负载
-        self.num_log_bins = 48 # Number of bars for the visualizer
+        self.num_log_bins = 64 # Number of bars for the visualizer
         self.device_id = None # Can be None for default device
         self.exclusive_mode = False
         # --- 从环境变量读取初始配置，实现简单的持久化/预设 ---
@@ -303,7 +303,7 @@ class AudioEngine:
                         log_binned_magnitude = np.zeros(self.num_log_bins)
                         if len(freqs) > 0:
                             # Define logarithmic bin edges
-                            min_freq = 20
+                            min_freq = 10 # Lowered from 20Hz to 10Hz to show more sub-bass and avoid "cut-off" look
                             max_freq = self.samplerate / 2
                             if max_freq > min_freq:
                                 log_min = np.log10(min_freq)
@@ -319,6 +319,20 @@ class AudioEngine:
                                     if np.any(in_bin_mask):
                                         # Use Root Mean Square (RMS) for a perceptually accurate representation of power.
                                         log_binned_magnitude[i-1] = np.sqrt(np.mean(np.square(magnitude[in_bin_mask])))
+
+                                # FIX: Interpolate to fill empty bins caused by low FFT resolution at low frequencies
+                                non_zero_mask = log_binned_magnitude > 0
+                                non_zero_indices = np.where(non_zero_mask)[0]
+                                
+                                if len(non_zero_indices) >= 2:
+                                    all_indices = np.arange(self.num_log_bins)
+                                    log_binned_magnitude = np.interp(
+                                        all_indices,
+                                        non_zero_indices,
+                                        log_binned_magnitude[non_zero_indices]
+                                    )
+                                elif len(non_zero_indices) == 1:
+                                    log_binned_magnitude[:] = log_binned_magnitude[non_zero_indices[0]]
 
                         # 转换为分贝并归一化
                         log_magnitude = 20 * np.log10(log_binned_magnitude + 1e-9) # 避免log(0)
