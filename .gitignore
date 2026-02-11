@@ -21,3 +21,6 @@ rust_audio_engine/target/
 
 # IDE history
 .history/
+
+# Plugin runtime reports
+**/reports/
