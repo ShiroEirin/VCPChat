@@ -277,7 +277,7 @@ export const tools = {
         ]
     },
     'MusicController': {
-        displayName: '莱恩家的点歌台',
+        displayName: '主人家的点歌台',
         description: '播放音乐。',
         commands: {
             'playSong': {
@@ -302,11 +302,8 @@ export const tools = {
     },
     'AgentMessage': {
         displayName: '主人通讯器',
-        description: '向莱恩主人的设备发送通知消息。',
-        params: [
-            { name: 'maid', type: 'text', required: true, placeholder: '你的名字' },
-            { name: 'message', type: 'textarea', required: true, placeholder: '要发送的消息内容' }
-        ]
+        description: '向主人的设备发送通知消息。',
+        params: [{ name: 'message', type: 'textarea', required: true, placeholder: '要发送的消息内容' }]
     },
     'VCPForum': {
         displayName: 'VCP 论坛',
