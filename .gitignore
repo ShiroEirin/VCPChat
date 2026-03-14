@@ -1,6 +1,15 @@
-gitignore
+node_modules/
+AppData/
+public/
 
-# 不忽略 .gitignore 文件本身（这是 Git 的常见实践）
+# 壁纸目录 - 文件太大不适合提交
+assets/wallpaper/
+
+# 插件配置文件 - 包含本地环境配置，避免合并时被覆盖
+VCPDistributedServer/Plugin/**/config.env
+VCPDistributedServer/Plugin/**/.env
+
+# 不忽略 .gitignore 文件本身（这是Git的常见实践）
 !.gitignore
 
 AppData/
