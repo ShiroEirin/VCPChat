@@ -11,13 +11,9 @@ contextBridge.exposeInMainWorld("electron", {
   send: (channel, data) => {
     // whitelist channels
     let validChannels = [
-      "open-music-folder",
       "open-music-window",
-      "save-music-playlist",
-      "save-custom-playlists",
       "music-track-changed",
       "music-renderer-ready",
-      "share-file-to-main",
     ];
     if (validChannels.includes(channel)) {
       ipcRenderer.send(channel, data);
@@ -44,6 +40,7 @@ contextBridge.exposeInMainWorld("electron", {
       "music-set-eq",
       "music-set-eq-type",
       "music-configure-optimizations",
+      "music-configure-upsampling", // 新增：升频配置通道
       "music-get-lyrics", // 新增：获取歌词
       "music-fetch-lyrics", // 新增：从网络获取歌词
       // --- WebDAV channels ---
@@ -81,9 +78,6 @@ contextBridge.exposeInMainWorld("electron", {
       "music-set-noise-shaper-curve",
       // --- IR Status ---
       "music-get-ir-status",
-      // --- IR Presets ---
-      "music-list-ir-presets",
-      "music-get-ir-preset-path",
       // --- Resampling Settings ---
       "music-configure-resampling",
       // --- Settings Persistence ---
@@ -100,9 +94,6 @@ contextBridge.exposeInMainWorld("electron", {
       "scan-started",
       "scan-progress",
       "scan-finished",
-      "music-scan-start",
-      "music-scan-progress",
-      "music-scan-complete",
       "audio-engine-error", // 用于接收来自主进程的引擎错误通知
       "music-set-track", // 用于从主进程设置当前曲目
       "webdav-scan-progress", // WebDAV 扫描进度
