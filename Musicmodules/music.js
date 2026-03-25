@@ -107,6 +107,7 @@ document.addEventListener('DOMContentLoaded', () => {
         webdavDialogConfirm: document.getElementById('webdav-dialog-confirm'),
         webdavDialogStatus: document.getElementById('webdav-dialog-status'),
         addWebDavBtn: document.getElementById('add-webdav-btn'),
+        semanticSearchBtn: document.getElementById('semantic-search-btn'),
 
         // --- State Variables ---
         playlist: [],
@@ -194,10 +195,14 @@ document.addEventListener('DOMContentLoaded', () => {
         shuffleQueue: [],
         lastShuffleList: null,
         wnpAdapter: null,
+        _gaplessJustSwitched: false,
+        _gaplessSwitchTimer: null,
         dragInProgress: false,
         isChangingState: false,
         lastCommandTime: 0,
         expectedPlayingState: false,
+        isSemanticSearchActive: false,
+        isSemanticSearching: false,
     };
 
 
@@ -237,8 +242,39 @@ document.addEventListener('DOMContentLoaded', () => {
             if (savedPlaylist && savedPlaylist.length > 0) {
                 app.playlist = savedPlaylist;
                 app.renderPlaylist();
+            }
+
+            // 检查是否有待播放的曲目（AI 点歌触发的新窗口）
+            const pendingTrack = await window.electron.invoke('music-get-pending-track');
+            if (pendingTrack && pendingTrack.path) {
+                console.log('[Music] Found pending track from main process:', pendingTrack.title);
+                // 在播放列表中查找匹配的曲目
+                const normalizedPendingPath = app.normalizePathForCompare(pendingTrack.path);
+                let pendingIndex = app.playlist.findIndex(t =>
+                    app.normalizePathForCompare(t.path) === normalizedPendingPath
+                );
+                // 如果路径匹配失败，尝试标题模糊匹配
+                if (pendingIndex === -1 && pendingTrack.title) {
+                    pendingIndex = app.playlist.findIndex(t =>
+                        (t.title || '').toLowerCase().includes(pendingTrack.title.toLowerCase()) ||
+                        (pendingTrack.title.toLowerCase().includes((t.title || '').toLowerCase()) && (t.title || '').length > 2)
+                    );
+                }
+                if (pendingIndex !== -1) {
+                    console.log('[Music] Loading pending track at index:', pendingIndex);
+                    await app.loadTrack(pendingIndex, true); // 加载并播放
+                } else {
+                    // 播放列表中没找到，追加后播放
+                    app.playlist.push(pendingTrack);
+                    app.renderPlaylist();
+                    await app.loadTrack(app.playlist.length - 1, true);
+                    window.electron.invoke('save-music-playlist', app.playlist);
+                }
+            } else if (app.playlist.length > 0) {
+                // 没有待播放曲目，按默认行为加载第一首（不自动播放）
                 await app.loadTrack(0, false);
             }
+
             await app.loadCustomPlaylists();
             app.renderSidebarContent('all');
 
@@ -250,6 +286,12 @@ document.addEventListener('DOMContentLoaded', () => {
             syncInitialSettings(initialState);
         }
         app.populateDeviceList(false);
+
+        // Signal that the renderer is ready to handle commands
+        if (window.electron) {
+            console.log('[Music] Sending "music-renderer-ready" signal to main process.');
+            window.electron.send('music-renderer-ready');
+        }
         app.createEqBands();
         app.populateEqPresets();
     };
@@ -511,9 +553,30 @@ document.addEventListener('DOMContentLoaded', () => {
         });
 
         app.searchInput.oninput = (e) => {
+            if (app.isSemanticSearchActive) return; // 语义搜索模式下不进行实时过滤
             const query = e.target.value.toLowerCase();
             app.currentFilteredTracks = query ? app.playlist.filter(t => (t.title || '').toLowerCase().includes(query) || (t.artist || '').toLowerCase().includes(query)) : null;
             app.renderPlaylist(app.currentFilteredTracks);
+        };
+
+        app.searchInput.onkeydown = (e) => {
+            if (e.key === 'Enter' && app.isSemanticSearchActive) {
+                const query = app.searchInput.value.trim();
+                if (query) app.performSemanticSearch(query);
+            }
+        };
+
+        app.semanticSearchBtn.onclick = () => {
+            app.isSemanticSearchActive = !app.isSemanticSearchActive;
+            app.semanticSearchBtn.classList.toggle('active', app.isSemanticSearchActive);
+            app.searchInput.placeholder = app.isSemanticSearchActive ? "输入描述进行语义搜索..." : "搜索歌曲...";
+            
+            if (!app.isSemanticSearchActive) {
+                // 退出语义搜索时恢复普通搜索
+                const query = app.searchInput.value.toLowerCase();
+                app.currentFilteredTracks = query ? app.playlist.filter(t => (t.title || '').toLowerCase().includes(query) || (t.artist || '').toLowerCase().includes(query)) : null;
+                app.renderPlaylist(app.currentFilteredTracks);
+            }
         };
 
         app.minimizeBtn.onclick = () => { if (window.electronAPI) window.electronAPI.minimizeWindow(); };
@@ -537,21 +600,92 @@ document.addEventListener('DOMContentLoaded', () => {
             app.scanProgressBar.style.width = `${percent}%`;
             app.scanProgressLabel.textContent = `正在扫描: ${data.current} / ${data.total}`;
         });
-        window.electron.on('music-scan-complete', (newPlaylist) => {
+        window.electron.on('music-scan-complete', (data) => {
             app.loadingIndicator.style.display = 'none';
-            // Merge new tracks, avoiding duplicates by path
-            const existingPaths = new Set(app.playlist.map(t => t.path));
-            const brandNewTracks = newPlaylist.filter(t => !existingPaths.has(t.path));
-            app.playlist = [...app.playlist, ...brandNewTracks];
+            // data may be { tracks, folderPath } (new format) or plain array (legacy)
+            const newPlaylist = Array.isArray(data) ? data : (data.tracks || []);
+            const folderPath = Array.isArray(data) ? null : (data.folderPath || null);
+
+            // Build a map of newly scanned tracks by path for quick lookup
+            const scannedMap = new Map(newPlaylist.map(t => [t.path, t]));
+            const scannedPaths = new Set(scannedMap.keys());
+
+            // Normalize folder path for prefix matching (ensure trailing separator)
+            const folderPrefix = folderPath ? folderPath.replace(/[\\/]+$/, '') : null;
+
+            const updatedPlaylist = [];
+            const handledPaths = new Set();
+
+            for (const track of app.playlist) {
+                if (scannedPaths.has(track.path)) {
+                    // Track exists in new scan — use updated metadata
+                    updatedPlaylist.push(scannedMap.get(track.path));
+                    handledPaths.add(track.path);
+                } else if (folderPrefix && track.path.startsWith(folderPrefix)) {
+                    // Track belongs to the scanned folder but was NOT found in new scan
+                    // → file was deleted from disk, remove it from playlist
+                    // (skip adding it)
+                } else {
+                    // Track from a different folder/source — keep it
+                    updatedPlaylist.push(track);
+                }
+            }
+
+            // Add brand-new tracks that weren't in the existing playlist
+            for (const track of newPlaylist) {
+                if (!handledPaths.has(track.path)) {
+                    updatedPlaylist.push(track);
+                }
+            }
+
+            app.playlist = updatedPlaylist;
             app.renderPlaylist(); app.renderSidebarContent(app.currentSidebarView);
             window.electron.invoke('save-music-playlist', app.playlist);
         });
         window.electron.on('theme-updated', (theme) => app.applyTheme(theme));
         window.electron.on('music-control', (command) => {
+            console.log('[Music] Received music-control command:', command);
             if (command === 'play') app.playTrack();
             else if (command === 'pause') app.pauseTrack();
             else if (command === 'next') app.nextTrack();
             else if (command === 'previous') app.prevTrack();
+        });
+
+        // --- 处理从主进程发来的 "点歌" 命令 ---
+        // 当 AI 或分布式服务器点歌时，主进程会发送 music-set-track 通知
+        // 前端在播放列表中查找匹配的曲目，并通过 loadTrack() 统一处理加载+UI更新+播放
+        window.electron.on('music-set-track', (track) => {
+            console.log('[Music] Received music-set-track:', track?.title, track?.path);
+            if (!track || !track.path) return;
+
+            // 在播放列表中查找匹配的曲目
+            const normalizedTrackPath = app.normalizePathForCompare(track.path);
+            let trackIndex = app.playlist.findIndex(t =>
+                app.normalizePathForCompare(t.path) === normalizedTrackPath
+            );
+
+            // 如果路径精确匹配失败，尝试标题+艺术家模糊匹配
+            if (trackIndex === -1 && track.title) {
+                trackIndex = app.playlist.findIndex(t =>
+                    (t.title || '').toLowerCase().includes(track.title.toLowerCase()) ||
+                    (track.title.toLowerCase().includes((t.title || '').toLowerCase()) && (t.title || '').length > 2)
+                );
+            }
+
+            if (trackIndex !== -1) {
+                console.log('[Music] Found track in playlist at index:', trackIndex);
+                app.loadTrack(trackIndex, true); // true = 加载并自动播放
+            } else {
+                console.warn('[Music] music-set-track: Track not found in local playlist:', track.title);
+                // 即使播放列表中没找到，也可尝试直接用 track 信息播放
+                // 将 track 添加到播放列表末尾后播放
+                app.playlist.push(track);
+                const newIndex = app.playlist.length - 1;
+                app.renderPlaylist(app.currentFilteredTracks);
+                app.loadTrack(newIndex, true);
+                // 持久化
+                if (window.electron) window.electron.invoke('save-music-playlist', app.playlist);
+            }
         });
     };
 

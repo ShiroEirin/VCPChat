@@ -9,6 +9,26 @@ assets/wallpaper/
 VCPDistributedServer/Plugin/**/config.env
 VCPDistributedServer/Plugin/**/.env
 
-# 不忽略 .gitignore 文件本身（这是Git的常见实践）
-!.gitignore
+.env
+!audio_engine/.env
 
+/public/assets
+
+**/.DS_Store
+
+# Rust build artifacts
+**/target/
+**/Cargo.lock
+rust_audio_engine/.cargo/
+
+# Reports and logs
+**/reports/
+
+# 临时忽略的文件（本地修改，不提交）
+.npmrc
+modules/ipc/chatHandlers.js
+modules/itemListManager.js
+modules/settingsManager.js
+package-lock.json
+package.json
+styles/themes.css
