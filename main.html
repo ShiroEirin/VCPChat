@@ -1241,7 +1241,7 @@
 
                                 <div class="form-group" id="middleClickQuickActionContainer"
                                     style="display: none; margin-bottom: 20px;">
-                                    <label for="middleClickQuickAction">中键快速执行功能:</label>
+                                    <label for="middleClickQuickAction" style="color: var(--highlight-text);">中键快速执行功能:</label>
                                     <select id="middleClickQuickAction" name="middleClickQuickAction">
                                         <option value="">请选择要快速执行的功能</option>
                                         <option value="edit">编辑消息</option>
@@ -1253,7 +1253,7 @@
                                         <option value="regenerate">重新回复</option>
                                         <option value="delete">删除消息</option>
                                     </select>
-                                    <small style="color: var(--text-secondary); margin-top: 5px; display: block;">
+                                    <small style="color: var(--text-on-accent); margin-top: 5px; display: block;">
                                         提示：启用后，中键按下消息气泡，1 秒内松开将快速执行选中的右键菜单功能
                                     </small>
                                 </div>
@@ -1277,7 +1277,7 @@
                                     style="display: none; margin-bottom: 20px;">
                                     <div class="form-group-inline"
                                         style="justify-content: space-between; align-items: center; margin-bottom: 15px;">
-                                        <label for="enableMiddleClickAdvanced">启用高级中键九宫格选择</label>
+                                        <label for="enableMiddleClickAdvanced">启用高级中键快捷环选择</label>
                                         <label class="switch">
                                             <input type="checkbox" id="enableMiddleClickAdvanced"
                                                 name="enableMiddleClickAdvanced">
@@ -1287,12 +1287,12 @@
 
                                     <div class="form-group" id="middleClickAdvancedSettings"
                                         style="display: none; margin-bottom: 15px;">
-                                        <label for="middleClickAdvancedDelay">九宫格出现延迟 (毫秒):</label>
+                                        <label for="middleClickAdvancedDelay">快捷环出现延迟 (毫秒):</label>
                                         <input type="number" id="middleClickAdvancedDelay"
                                             name="middleClickAdvancedDelay" min="1000" max="5000" step="100"
                                             value="1000" style="width: 100px;">
                                         <small style="color: var(--text-secondary); margin-top: 5px; display: block;">
-                                            提示：中键按下后不松开，延迟若干时间 (1000-5000ms) 后出现九宫格选择界面，按住鼠标移动到相关功能后松开即可完成快速设置。
+                                            提示：中键按下后不松开，延迟若干时间 (1000-5000ms) 后出现快捷环选择界面，按住鼠标移动到相关功能后松开即可完成快速设置。
                                         </small>
                                     </div>
                                 </div>
@@ -1623,6 +1623,10 @@
     </template>
 
     <div id="floating-toast-notifications-container"></div>
+
+    <!-- Pretext 文本布局引擎（纯算术高度预算，避免 reflow） -->
+    <script src="modules/renderer/pretext.bundle.js"></script>
+    <script src="modules/renderer/pretext-bridge.js"></script>
 
     <script src="modules/topicSummarizer.js"></script>
     <script src="modules/notificationRenderer.js"></script>

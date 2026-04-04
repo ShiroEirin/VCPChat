@@ -1041,7 +1041,12 @@ function removeMessageById(messageId, saveHistory = false) {
         // --- NEW: Cleanup dynamic content before removing from DOM ---
         const contentDiv = item.querySelector('.md-content');
         if (contentDiv) {
+            contentProcessor.cleanupPreviewsInContent(contentDiv);
             cleanupAnimationsInContent(contentDiv);
+        }
+        // [Pretext集成] 释放高度缓存，防止内存泄漏
+        if (window.pretextBridge && window.pretextBridge.evict) {
+            window.pretextBridge.evict(messageId);
         }
         // 停止观察消息可见性
         visibilityOptimizer.unobserveMessage(item);
@@ -1076,6 +1081,7 @@ function clearChat() {
         allMessages.forEach(item => {
             const contentDiv = item.querySelector('.md-content');
             if (contentDiv) {
+                contentProcessor.cleanupPreviewsInContent(contentDiv);
                 cleanupAnimationsInContent(contentDiv);
             }
             visibilityOptimizer.unobserveMessage(item);
@@ -1084,6 +1090,11 @@ function clearChat() {
         // 🟢 清理所有注入的 scoped CSS
         document.querySelectorAll('style[data-vcp-scope-id]').forEach(el => el.remove());
         document.querySelectorAll('style[data-chat-scope-id]').forEach(el => el.remove());
+
+        // [Pretext集成] 清空所有高度缓存
+        if (window.pretextBridge && window.pretextBridge.clearAll) {
+            window.pretextBridge.clearAll();
+        }
 
         mainRendererReferences.chatMessagesDiv.innerHTML = '';
     }
@@ -1259,6 +1270,77 @@ function initializeMessageRenderer(refs) {
         removeMessageById: removeMessageById,
     });
 
+    // --- 用户气泡文件拖拽支持 ---
+    mainRendererReferences.chatMessagesDiv.addEventListener('dragover', (e) => {
+        const messageItem = e.target.closest('.message-item.user');
+        if (!messageItem) return;
+        
+        const mdContent = messageItem.querySelector('.md-content');
+        if (!mdContent) return;
+        
+        e.preventDefault();
+        e.stopPropagation();
+        
+        // 关键修复：显式设置 dropEffect 允许外部文件放置
+        e.dataTransfer.dropEffect = 'copy';
+        
+        if (!mdContent.classList.contains('drag-over')) {
+            console.debug(`[MessageRenderer] Dragover detected on message ${messageItem.dataset.messageId}`);
+            mdContent.classList.add('drag-over');
+        }
+    });
+
+    mainRendererReferences.chatMessagesDiv.addEventListener('dragleave', (e) => {
+        const messageItem = e.target.closest('.message-item.user');
+        if (!messageItem) return;
+        
+        const mdContent = messageItem.querySelector('.md-content');
+        if (!mdContent) return;
+        
+        // 仅当鼠标真正离开该容器（而不是进入了它的子元素）时才移除类
+        const rect = mdContent.getBoundingClientRect();
+        if (e.clientX <= rect.left || e.clientX >= rect.right || e.clientY <= rect.top || e.clientY >= rect.bottom) {
+            mdContent.classList.remove('drag-over');
+        }
+    });
+
+    mainRendererReferences.chatMessagesDiv.addEventListener('drop', async (e) => {
+        const messageItem = e.target.closest('.message-item.user');
+        if (!messageItem) return;
+        
+        const mdContent = messageItem.querySelector('.md-content');
+        if (!mdContent) return;
+        
+        e.preventDefault();
+        e.stopPropagation();
+        mdContent.classList.remove('drag-over');
+        
+        const messageId = messageItem.dataset.messageId;
+        const files = e.dataTransfer.files;
+        
+        console.log(`[MessageRenderer] Drop detected on message ${messageId}. Files count: ${files?.length || 0}`);
+        
+        if (files && files.length > 0) {
+            if (window.chatManager && window.chatManager.processFilesData) {
+                // 使用通用的文件读取管线
+                const processedFiles = await window.chatManager.processFilesData(files);
+                const successfulFiles = processedFiles.filter(f => !f.error);
+                
+                if (successfulFiles.length > 0) {
+                    window.chatManager.addAttachmentsToMessage(messageId, successfulFiles);
+                } else if (processedFiles.length > 0) {
+                    const firstError = processedFiles.find(f => f.error)?.error;
+                    console.error(`[MessageRenderer] All files failed to process: ${firstError}`);
+                    if (window.uiHelperFunctions && window.uiHelperFunctions.showToastNotification) {
+                        window.uiHelperFunctions.showToastNotification(`读取文件失败: ${firstError}`, 'error');
+                    }
+                }
+            } else {
+                console.error('[MessageRenderer] window.chatManager.processFilesData not available!');
+            }
+        }
+    });
+
     injectEnhancedStyles();
     console.log("[MessageRenderer] Initialized. Current selected item type on init:", mainRendererReferences.currentSelectedItemRef.get()?.type);
 }
@@ -1297,18 +1379,34 @@ function setUserAvatarColor(color) { // For the user's global avatar
     const globalSettings = mainRendererReferences.globalSettingsRef.get();
     mainRendererReferences.globalSettingsRef.set({ ...globalSettings, userAvatarCalculatedColor: color });
 }
-
+function getAttachmentFileVisualDescriptor(name = '', type = '') {
+    const resolver = window.uiHelperFunctions?.resolveAttachmentFileVisual;
+    if (typeof resolver === 'function') {
+        return resolver(name, type);
+    }
+    return {
+        kind: 'file',
+        iconMarkup: `
+<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z"></path>
+    <path d="M14 2v5a1 1 0 0 0 1 1h5"></path>
+</svg>`
+    };
+}
 
 async function renderAttachments(message, contentDiv) {
     const { electronAPI } = mainRendererReferences;
     if (message.attachments && message.attachments.length > 0) {
         const attachmentsContainer = document.createElement('div');
         attachmentsContainer.classList.add('message-attachments');
-        message.attachments.forEach(att => {
+        message.attachments.forEach((att, index) => {
+            const wrapper = document.createElement('div');
+            wrapper.classList.add('message-attachment-wrapper');
+            
             let attachmentElement;
             if (att.type.startsWith('image/')) {
                 attachmentElement = document.createElement('img');
-                attachmentElement.src = att.src; // This src should be usable (e.g., file:// or data:)
+                attachmentElement.src = att.src;
                 attachmentElement.alt = `附件图片: ${att.name}`;
                 attachmentElement.title = `点击在新窗口预览: ${att.name}`;
                 attachmentElement.classList.add('message-attachment-image-thumbnail');
@@ -1317,7 +1415,7 @@ async function renderAttachments(message, contentDiv) {
                     const currentTheme = document.body.classList.contains('light-theme') ? 'light' : 'dark';
                     electronAPI.openImageViewer({ src: att.src, title: att.name, theme: currentTheme });
                 };
-                attachmentElement.addEventListener('contextmenu', (e) => { // Use attachmentElement here
+                attachmentElement.addEventListener('contextmenu', (e) => {
                     e.preventDefault(); e.stopPropagation();
                     electronAPI.showImageContextMenu(att.src);
                 });
@@ -1330,21 +1428,45 @@ async function renderAttachments(message, contentDiv) {
                 attachmentElement.src = att.src;
                 attachmentElement.controls = true;
                 attachmentElement.style.maxWidth = '300px';
-            } else { // Generic file
+            } else {
                 attachmentElement = document.createElement('a');
                 attachmentElement.href = att.src;
-                attachmentElement.textContent = `📄 ${att.name}`;
+                const fileVisual = getAttachmentFileVisualDescriptor(att.name, att.type);
+                attachmentElement.classList.add('message-attachment-file', `message-attachment-file--${fileVisual.kind}`);
                 attachmentElement.title = `点击打开文件: ${att.name}`;
                 attachmentElement.onclick = (e) => {
                     e.preventDefault();
                     if (electronAPI.sendOpenExternalLink && att.src.startsWith('file://')) {
                         electronAPI.sendOpenExternalLink(att.src);
                     } else {
-                        console.warn("Cannot open local file attachment, API missing or path not a file URI:", att.src);
+                        console.warn("Cannot open local file attachment", att.src);
                     }
                 };
+                const iconSpan = document.createElement('span');
+                iconSpan.className = 'message-attachment-file-icon';
+                iconSpan.innerHTML = fileVisual.iconMarkup;
+                const nameSpan = document.createElement('span');
+                nameSpan.className = 'message-attachment-file-name';
+                nameSpan.textContent = att.name;
+                attachmentElement.appendChild(iconSpan);
+                attachmentElement.appendChild(nameSpan);
             }
-            if (attachmentElement) attachmentsContainer.appendChild(attachmentElement);
+            if (attachmentElement) {
+                wrapper.appendChild(attachmentElement);
+                // 添加删除按钮
+                const removeBtn = document.createElement('div');
+                removeBtn.className = 'message-attachment-remove-btn';
+                removeBtn.innerHTML = '&times;';
+                removeBtn.title = '移除此附件';
+                removeBtn.onclick = (e) => {
+                    e.preventDefault(); e.stopPropagation();
+                    if (window.chatManager && window.chatManager.removeAttachmentFromMessage) {
+                        window.chatManager.removeAttachmentFromMessage(message.id, index);
+                    }
+                };
+                wrapper.appendChild(removeBtn);
+                attachmentsContainer.appendChild(wrapper);
+            }
         });
         contentDiv.appendChild(attachmentsContainer);
     }
@@ -1468,7 +1590,24 @@ async function renderMessage(message, isInitialLoad = false, appendToDom = true)
         // Apply special formatting for user button clicks
         if (message.role === 'user') {
             // 🔴 关键安全修复：用户输入属于不可信内容，必须先行进行 HTML 转义以防 XSS
+            // 🟢 改进：允许用户发送 <img> 标签（表情包），但需排除包含事件处理器的恶意标签
+            const userImgBlocks = [];
+            textToRender = textToRender.replace(/<img\s+[^>]*src=["']([^"']+)["'][^>]*>/gi, (match) => {
+                // 拒绝包含 onXXX 事件或 javascript: 协议的标签
+                if (/on\w+\s*=/i.test(match) || /src\s*=\s*["']\s*javascript:/i.test(match)) {
+                    return match; // 包含潜在恶意代码，不保护，后续会被转义
+                }
+                const placeholder = `__VCP_USER_IMG_${userImgBlocks.length}__`;
+                userImgBlocks.push(match);
+                return placeholder;
+            });
+
             textToRender = escapeHtml(textToRender);
+
+            // 还原受保护的 <img> 标签
+            userImgBlocks.forEach((img, i) => {
+                textToRender = textToRender.replace(`__VCP_USER_IMG_${i}__`, img);
+            });
 
             textToRender = transformUserButtonClick(textToRender);
             textToRender = transformVCPChatCanvas(textToRender);
@@ -1557,6 +1696,16 @@ async function renderMessage(message, isInitialLoad = false, appendToDom = true)
         // Synchronously set the base HTML content
         const finalHtml = rawHtml;
         contentDiv.innerHTML = finalHtml;
+
+        // [Pretext集成] 异步填充文本高度缓存，不阻塞渲染
+        if (window.pretextBridge && window.pretextBridge.isReady()) {
+            try {
+                const containerWidth = chatMessagesDiv ? chatMessagesDiv.clientWidth : 800;
+                window.pretextBridge.estimateHeight(message.id, textToRender, 'body', containerWidth);
+            } catch (e) {
+                // Pretext 失败不影响正常渲染
+            }
+        }
 
         // Define the post-processing logic as a function.
         // This allows us to control WHEN it gets executed.
@@ -1946,6 +2095,30 @@ function updateMessageContent(messageId, newContent) {
     const currentChatHistoryForUpdate = mainRendererReferences.currentChatHistoryRef.get();
     const messageInHistory = currentChatHistoryForUpdate.find(m => m.id === messageId);
 
+    // 🔴 修复：如果是用户消息，必须先转义以防 XSS，并应用用户特有转换
+    if (messageInHistory && messageInHistory.role === 'user') {
+        // 🟢 允许用户发送 <img> 标签（表情包），但需排除包含事件处理器的恶意标签
+        const userImgBlocks = [];
+        textToRender = textToRender.replace(/<img\s+[^>]*src=["']([^"']+)["'][^>]*>/gi, (match) => {
+            if (/on\w+\s*=/i.test(match) || /src\s*=\s*["']\s*javascript:/i.test(match)) {
+                return match;
+            }
+            const placeholder = `__VCP_USER_IMG_${userImgBlocks.length}__`;
+            userImgBlocks.push(match);
+            return placeholder;
+        });
+
+        textToRender = escapeHtml(textToRender);
+
+        // 还原受保护的 <img> 标签
+        userImgBlocks.forEach((img, i) => {
+            textToRender = textToRender.replace(`__VCP_USER_IMG_${i}__`, img);
+        });
+
+        textToRender = transformUserButtonClick(textToRender);
+        textToRender = transformVCPChatCanvas(textToRender);
+    }
+
     // --- 按“对话轮次”计算深度 ---
     const depthForUpdate = calculateDepthByTurns(messageId, currentChatHistoryForUpdate);
     // --- 深度计算结束 ---
@@ -2223,6 +2396,22 @@ window.messageRenderer = {
     clearChat,
     removeMessageById,
     updateMessageContent, // Expose the new function
+    updateMessageUI: async (messageId, updatedMessage) => {
+        const { chatMessagesDiv } = mainRendererReferences;
+        const existingMessageDom = chatMessagesDiv.querySelector(`.message-item[data-message-id="${messageId}"]`);
+        if (!existingMessageDom) return;
+        const newMessageDom = await renderMessage(updatedMessage, true, false);
+        if (newMessageDom) {
+            existingMessageDom.replaceWith(newMessageDom);
+            // 重新观察
+            visibilityOptimizer.observeMessage(newMessageDom);
+            // 运行后续处理 logic
+            if (typeof newMessageDom._vcp_process === 'function') {
+                newMessageDom._vcp_process();
+                delete newMessageDom._vcp_process;
+            }
+        }
+    },
     isMessageInitialized: (messageId) => {
         // Check if message exists in DOM or is being tracked by streamManager
         const messageInDom = mainRendererReferences.chatMessagesDiv?.querySelector(`.message-item[data-message-id="${messageId}"]`);

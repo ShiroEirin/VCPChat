@@ -520,7 +520,29 @@ function processAndRenderSmoothChunk(messageId) {
     // Scroll if the message is in the current view.
     const context = messageContextMap.get(messageId);
     if (isMessageForCurrentView(context)) {
-        throttledScrollToBottom(messageId);
+        // [Pretext集成] 智能滚动锚定
+        const chatDiv = refs.chatMessagesDiv;
+        const isNearBottom = chatDiv && (chatDiv.scrollHeight - chatDiv.clientHeight <= chatDiv.scrollTop + 50);
+
+        if (window.pretextBridge && window.pretextBridge.isReady() && chatDiv) {
+            try {
+                const containerWidth = chatDiv.clientWidth || 800;
+                const currentFullText = accumulatedStreamText.get(messageId) || '';
+                const oldHeight = window.pretextBridge.getCachedHeight(messageId) || 0;
+                const newHeight = window.pretextBridge.estimateHeight(messageId, currentFullText, 'body', containerWidth);
+                const delta = (newHeight || 0) - oldHeight;
+
+                if (isNearBottom) {
+                    throttledScrollToBottom(messageId);
+                } else if (delta > 0) {
+                    chatDiv.scrollTop += delta;
+                }
+            } catch (e) {
+                throttledScrollToBottom(messageId);
+            }
+        } else {
+            throttledScrollToBottom(messageId);
+        }
     }
 }
 
@@ -1122,12 +1144,17 @@ export async function finalizeStreamedMessage(messageId, finishReason, context, 
     const payloadResponseIsUsable = payloadFullResponse.trim() !== "" && !isThinkingPlaceholderText(payloadFullResponse);
 
     let finalFullText = accumulatedText;
-    if (storedContext.isGroupMessage === true && !streamedTextIsUsable) {
-        if (payloadResponseIsUsable) {
-            finalFullText = payloadFullResponse;
-        } else if (payloadError) {
-            finalFullText = `[错误] ${payloadError}`;
-        } else if (isThinkingPlaceholderText(finalFullText)) {
+    
+    // --- Consistency Logic: Choose the most complete text available ---
+    // If the main process payload has more content (as in error recovery) or is explicitly marked as recovery, prefer it.
+    if (payloadResponseIsUsable && (payloadFullResponse.length > accumulatedText.length || payloadFullResponse.includes('[!WARNING]'))) {
+        finalFullText = payloadFullResponse;
+    }
+
+    if (!finalFullText || isThinkingPlaceholderText(finalFullText)) {
+        if (payloadError) {
+            finalFullText = `[系统错误] ${payloadError}`;
+        } else {
             finalFullText = "";
         }
     }
