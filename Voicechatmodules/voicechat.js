@@ -145,6 +145,20 @@ document.addEventListener('DOMContentLoaded', () => {
         check();
     }
 
+    function getVoiceRuntimeSettings(settings = {}) {
+        return {
+            voiceMode: settings.voiceMode || 'local',
+            speechRecognizerBrowserPath: settings.speechRecognizerBrowserPath || '',
+            speechRecognizerPagePath: settings.speechRecognizerPagePath || 'Voicechatmodules/recognizer.html',
+            voiceNetworkSettings: settings.voiceNetworkSettings || { sovitsUrl: '', sovitsKey: '' },
+            voiceLocalSettings: settings.voiceLocalSettings || { providerUrl: '', providerKey: '' }
+        };
+    }
+
+    function getVoiceModeLabel(runtimeSettings) {
+        return runtimeSettings.voiceMode === 'network' ? '网络语音模式' : '本地语音模式';
+    }
+
     waitForElectronAPI(() => {
         window.electronAPI.onVoiceChatData(async (data) => {
         console.log('Received voice chat data:', data);
@@ -152,6 +166,10 @@ document.addEventListener('DOMContentLoaded', () => {
         
         agentId = receivedAgentId;
         globalSettings = await window.electronAPI.loadSettings();
+        globalSettings = {
+            ...globalSettings,
+            ...getVoiceRuntimeSettings(globalSettings)
+        };
         agentConfig = await window.electronAPI.getAgentConfig(agentId);
 
         if (!agentConfig || agentConfig.error) {
@@ -163,7 +181,7 @@ document.addEventListener('DOMContentLoaded', () => {
         document.body.classList.toggle('light-theme', theme === 'light');
         document.body.classList.toggle('dark-theme', theme === 'dark');
         agentAvatarImg.src = agentConfig.avatarUrl || '../assets/default_avatar.png';
-        agentNameSpan.textContent = `${agentConfig.name} - 语音模式`;
+        agentNameSpan.textContent = `${agentConfig.name} - ${getVoiceModeLabel(globalSettings)}`;
 
         initializeRenderer();
         });
@@ -216,7 +234,7 @@ document.addEventListener('DOMContentLoaded', () => {
             inputMode = 'voice';
             keyboardIcon.style.display = 'none';
             micIcon.style.display = 'block';
-            messageInput.placeholder = '正在聆听...';
+            messageInput.placeholder = `正在聆听... (${getVoiceModeLabel(globalSettings)})`;
             messageInput.value = '';
             window.electronAPI.startSpeechRecognition();
         } else {
@@ -367,10 +385,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         if (messageElement) {
             const contentElement = messageElement.querySelector('.md-content');
-            if (contentElement) {
+            if (contentElement && window.messageRenderer?.extractSpeakableTextFromContentElement) {
+                textToSpeak = window.messageRenderer.extractSpeakableTextFromContentElement(contentElement);
+            } else if (contentElement) {
                 const contentClone = contentElement.cloneNode(true);
-                contentClone.querySelectorAll('.vcp-tool-use-bubble').forEach(el => el.remove());
-                textToSpeak = contentClone.innerText || '';
+                contentClone.querySelectorAll('.vcp-tool-use-bubble, .vcp-tool-result-bubble, .maid-diary-bubble, .vcp-role-divider, .vcp-thought-chain-bubble, style, script').forEach(el => el.remove());
+                textToSpeak = (contentClone.innerText || '').replace(/\n{3,}/g, '\n\n').trim();
             } else {
                 textToSpeak = messageElement.textContent || messageElement.innerText;
             }
@@ -403,7 +423,9 @@ document.addEventListener('DOMContentLoaded', () => {
                         console.log(`[VoiceChat] 找到备用匹配元素: ${idAttr}`);
                         const contentElement = item.querySelector('.md-content');
                         if (contentElement) {
-                            const backupText = contentElement.innerText || '';
+                            const backupText = window.messageRenderer?.extractSpeakableTextFromContentElement
+                                ? window.messageRenderer.extractSpeakableTextFromContentElement(contentElement)
+                                : (contentElement.innerText || '').replace(/\n{3,}/g, '\n\n').trim();
                             if (backupText.trim().length > 0) {
                                 console.log(`[VoiceChat] 使用备用元素提取到文本长度: ${backupText.trim().length}`);
                                 playTTS(backupText.trim(), messageId);
@@ -424,7 +446,11 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        console.log(`[VoiceChat] Requesting TTS for message ${msgId}`);
+        console.log(`[VoiceChat] Requesting TTS for message ${msgId}`, {
+            voiceMode: globalSettings.voiceMode || 'local',
+            networkSovitsUrl: globalSettings.voiceNetworkSettings?.sovitsUrl || '',
+            localProviderUrl: globalSettings.voiceLocalSettings?.providerUrl || ''
+        });
         window.electronAPI.sovitsSpeak({
             text: text,
             voice: agentConfig.ttsVoicePrimary,
