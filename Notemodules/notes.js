@@ -24,6 +24,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     const modalCancelBtn = document.getElementById('modalCancelBtn');
 
     // --- Custom Title Bar Elements ---
+    const previewToggleBtn = document.getElementById('preview-toggle-btn');
     const minimizeNotesBtn = document.getElementById('minimize-notes-btn');
     const maximizeNotesBtn = document.getElementById('maximize-notes-btn');
     const closeNotesBtn = document.getElementById('close-notes-btn');
@@ -42,7 +43,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     let dragState = {
         sourceIds: null,
         lastDragOverElement: null,
+        lastDragOverVisualElement: null,
         dropAction: null, // Can be 'before', 'after', 'inside'
+        rafId: null,
+        autoScrollFrameId: null,
+        pendingDragOverEvent: null,
+        lastPointer: null,
     };
 
     // --- SVG Icons ---
@@ -50,6 +56,25 @@ document.addEventListener('DOMContentLoaded', async () => {
     const CLOUD_FOLDER_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="item-icon"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM10 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"></path></svg>`;
     const NOTE_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="item-icon"><path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zM6 20V4h7v5h5v11H6z"></path></svg>`;
     const TOGGLE_ICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="folder-toggle"><path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z"></path></svg>`;
+
+
+    // --- Preview Panel Toggle ---
+    function updatePreviewToggleState(isPreviewCollapsed) {
+        document.body.classList.toggle('preview-collapsed', isPreviewCollapsed);
+        previewToggleBtn.classList.toggle('is-collapsed', isPreviewCollapsed);
+        previewToggleBtn.title = isPreviewCollapsed ? '打开预览区' : '关闭预览区';
+        previewToggleBtn.setAttribute('aria-label', isPreviewCollapsed ? '打开预览区' : '关闭预览区');
+        previewToggleBtn.setAttribute('aria-pressed', String(isPreviewCollapsed));
+        localStorage.setItem('notesPreviewCollapsed', String(isPreviewCollapsed));
+
+        if (window.pretextBridge && window.pretextBridge.isReady()) {
+            requestAnimationFrame(() => window.pretextBridge.recalculateAll(window.innerWidth));
+        }
+    }
+
+    function togglePreviewPanel() {
+        updatePreviewToggleState(!document.body.classList.contains('preview-collapsed'));
+    }
 
 
     // --- Debounce & Utility Functions ---
@@ -510,7 +535,11 @@ document.addEventListener('DOMContentLoaded', async () => {
             const childrenUl = document.createElement('ul');
             childrenUl.className = 'folder-content';
             childrenUl.classList.toggle('collapsed', isCollapsed);
-            if (item.children) {
+
+            // PERFORMANCE: Do not build hidden subtree DOM for collapsed folders.
+            // Large cloud folders can contain thousands of notes; keeping their hidden DOM around
+            // makes dragover hit-testing and selector scans visibly stutter.
+            if (item.children && !isCollapsed) {
                 item.children.forEach(child => childrenUl.appendChild(createTreeElement(child)));
             }
             li.appendChild(childrenUl);
@@ -539,6 +568,34 @@ document.addEventListener('DOMContentLoaded', async () => {
             expandedFolders.add(folderId);
         }
         renderTree(); // Re-render to reflect the change
+    }
+
+    // PERFORMANCE: Update only the selection/active visual state without rebuilding the tree.
+    // Used by click & context-menu paths so they don't block the main thread on large trees.
+    function updateSelectionVisuals() {
+        // Clear current visuals
+        noteList.querySelectorAll('.selected, .active').forEach(el => {
+            el.classList.remove('selected', 'active');
+        });
+
+        const getVisualTarget = (li) => {
+            if (!li) return null;
+            return li.matches('.note-item') ? li : li.querySelector(':scope > .folder-header-row');
+        };
+
+        // Apply selection
+        selectedItems.forEach(id => {
+            const li = noteList.querySelector(`li[data-id="${CSS.escape(id)}"]`);
+            const target = getVisualTarget(li);
+            if (target) target.classList.add('selected');
+        });
+
+        // Apply active
+        if (activeItemId) {
+            const li = noteList.querySelector(`li[data-id="${CSS.escape(activeItemId)}"]`);
+            const target = getVisualTarget(li);
+            if (target) target.classList.add('active');
+        }
     }
 
     // --- Event Handlers ---
@@ -577,7 +634,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         } else {
             clearNoteEditor();
         }
-        renderTree();
+        // PERFORMANCE: Avoid re-rendering the whole tree just to move the selection highlight.
+        updateSelectionVisuals();
     }
 
     async function selectNote(id, notePath) {
@@ -801,23 +859,30 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     async function handleListDragStart(e) {
         const dragElement = e.target.closest('li[draggable="true"]');
-        if (!dragElement) {
+        if (!dragElement || !noteList.contains(dragElement)) {
             e.preventDefault();
             return;
         }
+
+        // Reset stale drag state from any previous interrupted drag.
+        cleanupDragOverVisuals();
+        dragState.sourceIds = null;
+        dragState.dropAction = null;
+        dragState.pendingDragOverEvent = null;
+        dragState.lastPointer = null;
+        if (dragState.rafId) {
+            cancelAnimationFrame(dragState.rafId);
+            dragState.rafId = null;
+        }
+        stopDragAutoScroll();
     
         const id = dragElement.dataset.id;
         // PERFORMANCE FIX: Manually update selection instead of re-rendering the whole tree.
         if (!selectedItems.has(id)) {
-            // Clear previous selection visuals
-            noteList.querySelectorAll('.selected').forEach(el => el.classList.remove('selected'));
             selectedItems.clear();
-            
-            // Select the new item
-            const itemContainer = dragElement.matches('.note-item') ? dragElement : dragElement.querySelector('.folder-header-row');
-            if(itemContainer) itemContainer.classList.add('selected');
             selectedItems.add(id);
             activeItemId = id;
+            updateSelectionVisuals();
         }
     
         dragState.sourceIds = Array.from(selectedItems);
@@ -826,7 +891,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     
         // Immediately add dragging class synchronously for snappier visual feedback
         dragState.sourceIds.forEach(selectedId => {
-            const el = noteList.querySelector(`li[data-id='${selectedId}']`);
+            const el = noteList.querySelector(`li[data-id="${CSS.escape(selectedId)}"]`);
             if (el) el.classList.add('dragging');
         });
         
@@ -843,79 +908,209 @@ document.addEventListener('DOMContentLoaded', async () => {
         }
     }
 
-    const throttledUpdateDragOverVisuals = throttle((targetElement, event) => {
-        // RACE CONDITION FIX: If drag has already ended, sourceIds will be null. Do nothing.
-        if (!dragState.sourceIds) {
-            return;
-        }
- 
-        // Clear previous target's visuals
-        if (dragState.lastDragOverElement && dragState.lastDragOverElement !== targetElement) {
-            dragState.lastDragOverElement.classList.remove('drag-over-folder', 'drag-over-target-top', 'drag-over-target-bottom');
-        }
-        dragState.lastDragOverElement = targetElement;
-        dragState.dropAction = null; // Reset action
-    
-        // Prevent dropping onto itself or its children (if dragging a folder)
-        if (dragState.sourceIds.includes(targetElement.dataset.id)) {
-            return;
-        }
-    
-        const rect = targetElement.getBoundingClientRect();
-        const isFolder = targetElement.dataset.type === 'folder';
-        const isNearTop = (event.clientY - rect.top) < (rect.height / 2);
-    
-        // Determine drop action based on position
-        if (isFolder) {
-            const dropIntoThreshold = rect.height * 0.25; // 25% margin top/bottom for reordering
-            if (event.clientY - rect.top < dropIntoThreshold) {
-                dragState.dropAction = 'before';
-            } else if (rect.bottom - event.clientY < dropIntoThreshold) {
-                dragState.dropAction = 'after';
-            } else {
-                dragState.dropAction = 'inside';
-            }
-        } else {
-            dragState.dropAction = isNearTop ? 'before' : 'after';
-        }
-    
-        // Apply visuals based on the determined action
-        targetElement.classList.toggle('drag-over-folder', dragState.dropAction === 'inside');
-        targetElement.classList.toggle('drag-over-target-top', dragState.dropAction === 'before');
-        targetElement.classList.toggle('drag-over-target-bottom', dragState.dropAction === 'after');
-    
-    }, 16);
-
-    function handleListDragOver(e) {
-        e.preventDefault(); // Necessary to allow for dropping
-        e.dataTransfer.dropEffect = 'move'; // 明确指示移动操作
-
-        // 缓存 closest 查询结果 on the target to avoid repeated DOM traversal
-        if (!e.target._cachedDraggable) {
-            e.target._cachedDraggable = e.target.closest('li[draggable="true"]');
-        }
-        const targetElement = e.target._cachedDraggable;
-
-        if (targetElement) {
-            throttledUpdateDragOverVisuals(targetElement, e);
+    function stopDragAutoScroll() {
+        if (dragState.autoScrollFrameId) {
+            cancelAnimationFrame(dragState.autoScrollFrameId);
+            dragState.autoScrollFrameId = null;
         }
     }
 
-function handleListDragLeave(e) {
-    // When leaving a specific item, remove its visuals
-    const targetElement = e.target.closest('li[draggable="true"]');
-    
-    // 只有当鼠标真正离开了整个列表项时才清理
-    if (targetElement && dragState.lastDragOverElement === targetElement) {
-        // 检查相关目标是否仍在同一个列表项内
-        const relatedTarget = e.relatedTarget;
-        const stillInSameItem = relatedTarget && targetElement.contains(relatedTarget);
-        
-        if (!stillInSameItem) {
-            dragState.lastDragOverElement.classList.remove('drag-over-folder', 'drag-over-target-top', 'drag-over-target-bottom');
-            dragState.lastDragOverElement = null;
-            dragState.dropAction = null;
+    function updateDragAutoScroll(clientY) {
+        if (!dragState.sourceIds) {
+            stopDragAutoScroll();
+            return;
         }
+
+        dragState.lastPointer = {
+            ...(dragState.lastPointer || {}),
+            clientY
+        };
+
+        if (dragState.autoScrollFrameId) return;
+
+        const scrollStep = () => {
+            dragState.autoScrollFrameId = null;
+
+            if (!dragState.sourceIds || !dragState.lastPointer) return;
+
+            const listRect = noteList.getBoundingClientRect();
+            const threshold = 56;
+            const maxSpeed = 18;
+            const { clientX, clientY: pointerY } = dragState.lastPointer;
+            let speed = 0;
+
+            if (pointerY < listRect.top + threshold) {
+                speed = -Math.ceil(((listRect.top + threshold - pointerY) / threshold) * maxSpeed);
+            } else if (pointerY > listRect.bottom - threshold) {
+                speed = Math.ceil(((pointerY - (listRect.bottom - threshold)) / threshold) * maxSpeed);
+            }
+
+            if (speed !== 0) {
+                noteList.scrollTop += speed;
+
+                // After scrolling, the element under the pointer changes even if dragover does not fire.
+                // Recalculate the target from viewport coordinates so top -> bottom dragging remains reliable.
+                if (typeof clientX === 'number') {
+                    scheduleDragOverUpdateFromPoint(clientX, pointerY);
+                }
+
+                dragState.autoScrollFrameId = requestAnimationFrame(scrollStep);
+            }
+        };
+
+        dragState.autoScrollFrameId = requestAnimationFrame(scrollStep);
+    }
+
+    function cleanupDragOverVisuals() {
+        if (dragState.lastDragOverVisualElement) {
+            dragState.lastDragOverVisualElement.classList.remove('drag-over-folder', 'drag-over-target-top', 'drag-over-target-bottom');
+        }
+        dragState.lastDragOverElement = null;
+        dragState.lastDragOverVisualElement = null;
+        dragState.dropAction = null;
+    }
+
+    function getRowItemElement(row) {
+        if (!row || !noteList.contains(row)) return null;
+        return row.matches('.note-item') ? row : row.closest('li.folder-item');
+    }
+
+    function isInvalidDropTarget(targetElement) {
+        if (!dragState.sourceIds || !targetElement) return true;
+
+        const targetId = targetElement.dataset.id;
+        if (dragState.sourceIds.includes(targetId)) return true;
+
+        // Prevent dropping a folder into one of its own descendants.
+        return dragState.sourceIds.some(sourceId => {
+            const sourceElement = noteList.querySelector(`li[data-id="${CSS.escape(sourceId)}"]`);
+            return sourceElement && sourceElement !== targetElement && sourceElement.contains(targetElement);
+        });
+    }
+
+    function getVisibleDropRows() {
+        const listRect = noteList.getBoundingClientRect();
+        return Array.from(noteList.querySelectorAll('.note-item, .folder-header-row'))
+            .map(row => {
+                const itemElement = getRowItemElement(row);
+                const rect = row.getBoundingClientRect();
+                return { row, itemElement, rect };
+            })
+            .filter(entry => {
+                const { itemElement, rect } = entry;
+                return itemElement
+                    && itemElement.matches('li[draggable="true"]')
+                    && rect.bottom >= listRect.top
+                    && rect.top <= listRect.bottom
+                    && !isInvalidDropTarget(itemElement);
+            });
+    }
+
+    function computeDropIntentFromPoint(clientX, clientY) {
+        if (!dragState.sourceIds) return null;
+
+        const element = document.elementFromPoint(clientX, clientY);
+        const directRow = element?.closest('.note-item, .folder-header-row');
+        const directItem = getRowItemElement(directRow);
+
+        // Only a direct hit on the folder header can become "inside".
+        if (directRow && directItem && !isInvalidDropTarget(directItem) && directItem.dataset.type === 'folder') {
+            const rect = directRow.getBoundingClientRect();
+            const offsetY = clientY - rect.top;
+            const insideThreshold = Math.max(6, rect.height * 0.28);
+
+            if (offsetY >= insideThreshold && (rect.bottom - clientY) >= insideThreshold) {
+                return {
+                    targetElement: directItem,
+                    visualElement: directRow,
+                    dropAction: 'inside'
+                };
+            }
+        }
+
+        const rows = getVisibleDropRows();
+        if (rows.length === 0) return null;
+
+        // Reorder by row center, not by "nearest row". This makes downward moves deterministic:
+        // pointer below a row center means "after" that row, not "before the nearest lower row".
+        let candidate = rows[rows.length - 1];
+        let action = 'after';
+
+        for (const entry of rows) {
+            const centerY = entry.rect.top + entry.rect.height / 2;
+            if (clientY < centerY) {
+                candidate = entry;
+                action = 'before';
+                break;
+            }
+        }
+
+        return {
+            targetElement: candidate.itemElement,
+            visualElement: candidate.row,
+            dropAction: action
+        };
+    }
+
+    function applyDropIntentVisuals(intent) {
+        if (!dragState.sourceIds) return;
+
+        if (!intent) {
+            cleanupDragOverVisuals();
+            return;
+        }
+
+        const { targetElement, visualElement, dropAction } = intent;
+
+        if (dragState.lastDragOverVisualElement && dragState.lastDragOverVisualElement !== visualElement) {
+            dragState.lastDragOverVisualElement.classList.remove('drag-over-folder', 'drag-over-target-top', 'drag-over-target-bottom');
+        }
+
+        dragState.lastDragOverElement = targetElement;
+        dragState.lastDragOverVisualElement = visualElement;
+        dragState.dropAction = dropAction;
+
+        visualElement.classList.toggle('drag-over-folder', dropAction === 'inside');
+        visualElement.classList.toggle('drag-over-target-top', dropAction === 'before');
+        visualElement.classList.toggle('drag-over-target-bottom', dropAction === 'after');
+    }
+
+    function scheduleDragOverUpdateFromPoint(clientX, clientY) {
+        const intent = computeDropIntentFromPoint(clientX, clientY);
+
+        dragState.pendingDragOverEvent = intent;
+
+        if (dragState.rafId) return;
+
+        dragState.rafId = requestAnimationFrame(() => {
+            dragState.rafId = null;
+            const pending = dragState.pendingDragOverEvent;
+            dragState.pendingDragOverEvent = null;
+            applyDropIntentVisuals(pending);
+        });
+    }
+
+    function scheduleDragOverUpdate(e) {
+        dragState.lastPointer = {
+            clientX: e.clientX,
+            clientY: e.clientY
+        };
+        scheduleDragOverUpdateFromPoint(e.clientX, e.clientY);
+    }
+
+    function handleListDragOver(e) {
+        e.preventDefault(); // Necessary to allow for dropping
+        if (!dragState.sourceIds) return;
+
+        e.dataTransfer.dropEffect = 'move'; // 明确指示移动操作
+        updateDragAutoScroll(e.clientY);
+        scheduleDragOverUpdate(e);
+    }
+
+function handleListDragLeave(e) {
+    if (!noteList.contains(e.relatedTarget)) {
+        cleanupDragOverVisuals();
+        stopDragAutoScroll();
     }
 }
 
@@ -924,14 +1119,22 @@ async function handleListDrop(e) {
     e.stopPropagation();
 
     // Keep local references to avoid race conditions if dragState is mutated elsewhere.
-    const dropTargetElement = dragState.lastDragOverElement;
-    const dropAction = dragState.dropAction;
+    let dropTargetElement = dragState.lastDragOverElement;
+    let dropAction = dragState.dropAction;
     const sourceIds = Array.isArray(dragState.sourceIds) ? [...dragState.sourceIds] : null;
 
-    // --- Cleanup visuals first ---
-    if (dropTargetElement) {
-        dropTargetElement.classList.remove('drag-over-folder', 'drag-over-target-top', 'drag-over-target-bottom');
+    // Always recompute at drop time. Dragover can be stale after auto-scroll, and using the stale
+    // target is exactly what caused "drag down but move up / only move a little".
+    if (dragState.lastPointer) {
+        const finalIntent = computeDropIntentFromPoint(dragState.lastPointer.clientX, dragState.lastPointer.clientY);
+        if (finalIntent) {
+            dropTargetElement = finalIntent.targetElement;
+            dropAction = finalIntent.dropAction;
+        }
     }
+
+    // --- Cleanup visuals first ---
+    cleanupDragOverVisuals();
     
     // --- Validate Drop ---
     if (!dropTargetElement || !dropAction || !sourceIds || sourceIds.length === 0) {
@@ -1001,24 +1204,31 @@ async function handleListDrop(e) {
 }
 
 function handleListDragEnd(e) {
-    // Prevent double execution: if there is no sourceIds and no lastDragOverElement, nothing to do.
-    if (!dragState.sourceIds && !dragState.lastDragOverElement) return;
+    // Prevent double execution if the drag was already fully cleaned.
+    if (!dragState.sourceIds && !dragState.lastDragOverElement && !dragState.lastDragOverVisualElement && !dragState.rafId) return;
+
+    if (dragState.rafId) {
+        cancelAnimationFrame(dragState.rafId);
+    }
+    stopDragAutoScroll();
 
     // Clear dragging classes
     noteList.querySelectorAll('.dragging').forEach(el => el.classList.remove('dragging'));
 
     // Clear drag over visuals
-    if (dragState.lastDragOverElement) {
-        dragState.lastDragOverElement.classList.remove('drag-over-folder', 'drag-over-target-top', 'drag-over-target-bottom');
-    }
+    cleanupDragOverVisuals();
 
     // Reset drag state
-    dragState = { sourceIds: null, lastDragOverElement: null, dropAction: null };
-
-    // 更彻底地清理缓存（改进版）
-    noteList.querySelectorAll('[_cachedDraggable]').forEach(el => {
-        delete el._cachedDraggable;
-    });
+    dragState = {
+        sourceIds: null,
+        lastDragOverElement: null,
+        lastDragOverVisualElement: null,
+        dropAction: null,
+        rafId: null,
+        autoScrollFrameId: null,
+        pendingDragOverEvent: null,
+        lastPointer: null,
+    };
 
     // Re-enable global selection listener only if it was active before the drag.
     if (api && api.toggleSelectionListener) {
@@ -1040,7 +1250,8 @@ function handleListDragEnd(e) {
             selectedItems.clear();
             selectedItems.add(item.id);
             activeItemId = item.id;
-            renderTree();
+            // PERFORMANCE: Only repaint selection state instead of rebuilding the tree.
+            updateSelectionVisuals();
         }
 
         const menu = document.getElementById('customContextMenu');
@@ -1081,9 +1292,18 @@ function handleListDragEnd(e) {
         };
     }
 
-    document.addEventListener('click', () => {
-        customContextMenu.style.display = 'none';
-    });
+    // Hide context menu reliably even when item click handlers stop propagation.
+    document.addEventListener('click', (e) => {
+        if (!customContextMenu.contains(e.target)) {
+            customContextMenu.style.display = 'none';
+        }
+    }, true);
+
+    document.addEventListener('contextmenu', (e) => {
+        if (!e.target.closest('#noteList [data-id]') && !customContextMenu.contains(e.target)) {
+            customContextMenu.style.display = 'none';
+        }
+    }, true);
 
     function startInlineRename(itemId) {
         const item = findItemById(getCombinedTree(), itemId);
@@ -1278,6 +1498,11 @@ function handleListDragEnd(e) {
         });
 
         // --- Custom Title Bar Listeners ---
+        const isPreviewCollapsed = localStorage.getItem('notesPreviewCollapsed') === 'true';
+        updatePreviewToggleState(isPreviewCollapsed);
+
+        previewToggleBtn.addEventListener('click', togglePreviewPanel);
+
         minimizeNotesBtn.addEventListener('click', () => {
             if (api) api.minimizeWindow();
         });
@@ -1351,6 +1576,11 @@ function handleListDragEnd(e) {
             // Ensure it's always an array, handling both old object format and null/undefined
             networkNoteTree = Array.isArray(freshNetworkTree) ? freshNetworkTree : (freshNetworkTree ? [freshNetworkTree] : []);
             renderTree(); // Re-render with the fresh data
+        });
+
+        // 6. Listen for local note tree changes so external file drops appear immediately.
+        api.onLocalNotesChanged?.(() => {
+            loadNoteTree();
         });
 
         api.onSharedNoteData(async (data) => {
