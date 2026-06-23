@@ -115,11 +115,15 @@ fn validate_path(path: &str) -> Result<String, String> {
     // Local file path validation
     let path = std::path::Path::new(path);
     
-    // Check for path traversal attempts
-    let path_str = path.to_string_lossy();
-    if path_str.contains("..") {
-        return Err("Path traversal not allowed: '..' found in path".into());
+    // Check for path traversal attempts.
+    // IMPORTANT: do not reject filenames that merely contain two dots, e.g.
+    // "02. One More Wish - Japanese Ver..mp3". Only an actual parent-dir
+    // component (`..`) is path traversal.
+    if path.components().any(|component| matches!(component, std::path::Component::ParentDir)) {
+        return Err("Path traversal not allowed: '..' path component found".into());
     }
+
+    let path_str = path.to_string_lossy();
     
     // On Windows, also check for drive letter injection
     #[cfg(windows)]
@@ -252,11 +256,6 @@ pub struct ConfigureNormalizationRequest {
     mode: Option<String>,  // "track" / "album" / "streaming"
     album_gain_db: Option<f64>,
     preamp_db: Option<f64>,
-}
-
-#[derive(Deserialize)]
-pub struct PreloadGainRequest {
-    tracks: Vec<String>,  // List of file paths to preload
 }
 
 #[derive(Deserialize)]
