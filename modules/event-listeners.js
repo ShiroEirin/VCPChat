@@ -453,13 +453,13 @@ export function setupEventListeners(deps) {
             e.preventDefault();
             e.stopPropagation();
 
-            // 检查心流锁是否激活
-            if (window.flowlockManager && window.flowlockManager.getState().isActive) {
-                uiHelperFunctions.showToastNotification('心流锁已启用，无法手动续写', 'warning');
+            const currentSelectedItem = refs.currentSelectedItem.get();
+
+            // 只限制当前 Agent；其他 Agent 的后台心流不影响本界面手动续写。
+            if (window.flowlockManager?.isAgentLocked?.(currentSelectedItem?.id)) {
+                uiHelperFunctions.showToastNotification('当前 Agent 已启用心流锁，无法手动续写', 'warning');
                 return;
             }
-
-            const currentSelectedItem = refs.currentSelectedItem.get();
             const currentTopicId = refs.currentTopicId.get();
             if (!currentSelectedItem.id || !currentTopicId) {
                 uiHelperFunctions.showToastNotification('请先选择一个项目和话题', 'warning');
@@ -1409,9 +1409,9 @@ export function setupEventListeners(deps) {
         if ((e.ctrlKey || e.metaKey) && e.key === 'd') {
             e.preventDefault();
 
-            // 检查心流锁是否激活
-            if (window.flowlockManager && window.flowlockManager.getState().isActive) {
-                uiHelperFunctions.showToastNotification('心流锁已启用，无法手动续写', 'warning');
+            // 只限制当前 Agent；其他 Agent 的后台心流不影响本界面手动续写。
+            if (window.flowlockManager?.isAgentLocked?.(refs.currentSelectedItem.get()?.id)) {
+                uiHelperFunctions.showToastNotification('当前 Agent 已启用心流锁，无法手动续写', 'warning');
                 return;
             }
 
@@ -1472,17 +1472,62 @@ export function setupEventListeners(deps) {
     }
 
     if (seamFixer && notificationsSidebar) {
-        const setSeamFixerWidth = () => {
-            const sidebarWidth = notificationsSidebar.getBoundingClientRect().width;
-            const offset = sidebarWidth > 0 ? 3 : 0;
-            seamFixer.style.right = `${sidebarWidth + offset}px`;
+        let seamFrame = 0;
+        let pendingSidebarWidth = 0;
+
+        const scheduleSeamFixerWidth = (width) => {
+            pendingSidebarWidth = width;
+            if (seamFrame) return;
+
+            seamFrame = requestAnimationFrame(() => {
+                seamFrame = 0;
+                const offset = pendingSidebarWidth > 0 ? 3 : 0;
+                seamFixer.style.right = `${pendingSidebarWidth + offset}px`;
+            });
         };
-        const resizeObserver = new ResizeObserver(setSeamFixerWidth);
+
+        const resizeObserver = new ResizeObserver((entries) => {
+            const entry = entries[entries.length - 1];
+            scheduleSeamFixerWidth(entry?.contentRect?.width || 0);
+        });
         resizeObserver.observe(notificationsSidebar);
-        const mutationObserver = new MutationObserver(setSeamFixerWidth);
-        mutationObserver.observe(notificationsSidebar, { attributes: true, attributeFilter: ['class', 'style'] });
-        setSeamFixerWidth();
     }
+
+    const setLayoutExperimentMode = (mode = 'baseline') => {
+        const normalizedMode = mode === 'overlay' ? 'overlay' : 'baseline';
+
+        if (normalizedMode === 'overlay') {
+            const settings = refs.globalSettings.get();
+            const leftWidth = parseFloat(leftSidebar?.style.width)
+                || settings.sidebarWidth
+                || 260;
+            const rightWidth = parseFloat(notificationsSidebar?.style.width)
+                || settings.notificationsSidebarWidth
+                || 310;
+            document.documentElement.style.setProperty('--vcp-overlay-left-width', `${leftWidth}px`);
+            document.documentElement.style.setProperty('--vcp-overlay-right-width', `${rightWidth}px`);
+        }
+
+        document.body.classList.toggle('vcp-layout-overlay-sidebars', normalizedMode === 'overlay');
+        document.body.dataset.vcpLayoutExperiment = normalizedMode;
+        console.info(`[LayoutExperiment] mode=${normalizedMode}`);
+        return getLayoutExperimentState();
+    };
+
+    const getLayoutExperimentState = () => ({
+        mode: document.body.classList.contains('vcp-layout-overlay-sidebars') ? 'overlay' : 'baseline',
+        leftSidebarActive: leftSidebar?.classList.contains('active') === true,
+        notificationsSidebarActive: notificationsSidebar?.classList.contains('active') === true
+    });
+
+    window.vcpLayoutExperiment = Object.freeze({
+        useBaseline: () => setLayoutExperimentMode('baseline'),
+        useOverlay: () => setLayoutExperimentMode('overlay'),
+        setMode: setLayoutExperimentMode,
+        getState: getLayoutExperimentState
+    });
+    document.body.dataset.vcpLayoutExperiment = 'baseline';
+    console.info('[LayoutExperiment] Ready: vcpLayoutExperiment.useBaseline() / useOverlay()');
 }
 
 

@@ -64,7 +64,8 @@ const STREAM_PRESERVED_BLOCK_CLASSES = [
     'vcp-role-divider',
     'mermaid',
     'katex',
-    'vcp-html-preview-container'
+    'vcp-html-preview-container',
+    'vcp-flowlock-bubble'
 ];
 const STREAM_PRESERVED_CHILD_ATTRS = [
     'data-vcp-preserve-children',
@@ -250,6 +251,15 @@ function messageIsFinalized(messageId) {
     // Don't rely on current history, check accumulated state
     const initStatus = messageInitializationStatus.get(messageId);
     return initStatus === 'finalized';
+}
+
+/**
+ * 判断请求是否仍处于等待首块或流式处理中。
+ * 该 Map 是跨 Agent/话题异步请求的运行态真源，不能只依赖单一的 activeStreamingMessageId。
+ */
+export function isMessageActive(messageId) {
+    const initStatus = messageInitializationStatus.get(messageId);
+    return initStatus === 'pending' || initStatus === 'ready';
 }
 
 function isThinkingPlaceholderText(text) {
@@ -2294,29 +2304,37 @@ export async function finalizeStreamedMessage(messageId, finishReason, context, 
     }
     
     // Cleanup
-        streamingChunkQueues.delete(messageId);
-        pendingDirectRenderMessages.delete(messageId);
-        accumulatedStreamText.delete(messageId);
-        streamSegmentStates.delete(messageId);
-        cleanupDesktopPushState(messageId);
-        
-        // Delayed cleanup
-        const existingCleanupTimer = delayedCleanupTimers.get(messageId);
-        if (existingCleanupTimer) {
-            clearTimeout(existingCleanupTimer);
-        }
-        const cleanupTimerId = setTimeout(() => {
-            messageDomCache.delete(messageId);
-            messageInitializationStatus.delete(messageId);
-            preBufferedChunks.delete(messageId);
-            messageContextMap.delete(messageId);
-            viewContextCache.delete(messageId);
-            delayedCleanupTimers.delete(messageId);
-        }, 5000);
-        delayedCleanupTimers.set(messageId, cleanupTimerId);
+    streamingChunkQueues.delete(messageId);
+    pendingDirectRenderMessages.delete(messageId);
+    accumulatedStreamText.delete(messageId);
+    streamSegmentStates.delete(messageId);
+    cleanupDesktopPushState(messageId);
+
+    // Delayed cleanup
+    const existingCleanupTimer = delayedCleanupTimers.get(messageId);
+    if (existingCleanupTimer) {
+        clearTimeout(existingCleanupTimer);
     }
-    
-    export function cleanupTransientState() {
+    const cleanupTimerId = setTimeout(() => {
+        messageDomCache.delete(messageId);
+        messageInitializationStatus.delete(messageId);
+        preBufferedChunks.delete(messageId);
+        messageContextMap.delete(messageId);
+        viewContextCache.delete(messageId);
+        delayedCleanupTimers.delete(messageId);
+    }, 5000);
+    delayedCleanupTimers.set(messageId, cleanupTimerId);
+
+    // 调用方（例如 Flowlock）需要基于真正落盘的完整文本解析最终控制协议。
+    return {
+        messageId,
+        context: storedContext,
+        content: finalFullText,
+        finishReason
+    };
+}
+
+export function cleanupTransientState() {
         // 清理所有流式消息相关状态
         for (const timerId of scrollThrottleTimers.values()) {
             clearTimeout(timerId);
@@ -2368,6 +2386,7 @@ window.streamManager = {
     appendStreamChunk,
     finalizeStreamedMessage,
     cleanupTransientState,
+    isMessageActive,
     getActiveStreamingMessageId: () => activeStreamingMessageId,
     getActiveStreamingContext: () => {
         if (!activeStreamingMessageId) return null;

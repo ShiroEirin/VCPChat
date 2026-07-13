@@ -1305,7 +1305,7 @@ function extractSpeakableTextFromContentElement(contentElement) {
 
     const contentClone = contentElement.cloneNode(true);
     contentClone.querySelectorAll(
-        '.vcp-tool-use-bubble, .vcp-tool-result-bubble, .vcp-tool-call-summary-bubble, .maid-diary-bubble, .vcp-role-divider, .vcp-thought-chain-bubble, style, script'
+        '.vcp-tool-use-bubble, .vcp-tool-result-bubble, .vcp-tool-call-summary-bubble, .vcp-flowlock-bubble, .maid-diary-bubble, .vcp-role-divider, .vcp-thought-chain-bubble, style, script'
     ).forEach(el => el.remove());
 
     return (contentClone.innerText || '')
@@ -2157,6 +2157,12 @@ function initializeMessageRenderer(refs) {
         applyContentProcessors: contentProcessor.applyContentProcessors,
         transformSpecialBlocks,
         ensureHtmlFenced,
+        transformFlowlockBlocks: (text) => {
+            if (!window.flowlockProtocol || typeof window.flowlockProtocol.transformForRender !== 'function') {
+                return text;
+            }
+            return window.flowlockProtocol.transformForRender(text);
+        },
         transformMermaidPlaceholders: (text) => {
             let transformed = text.replace(MERMAID_CODE_REGEX, (match, lang, code) => {
                 const tempEl = document.createElement('textarea');
@@ -2729,10 +2735,21 @@ async function renderMessage(message, isInitialLoad = false, appendToDom = true,
         visibilityOptimizer.observeMessage(messageItem);
     }
 
-    if (message.isThinking) {
+    const isActiveStreamRequest = message.role === 'assistant'
+        && typeof streamManager.isMessageActive === 'function'
+        && streamManager.isMessageActive(message.id);
+    const messageTextIsEmpty = message.content === null
+        || message.content === undefined
+        || (typeof message.content === 'string' && message.content.trim() === '');
+
+    if (message.isThinking || (isActiveStreamRequest && messageTextIsEmpty)) {
         contentDiv.innerHTML = `<span class="thinking-indicator">${message.content || '思考中'}<span class="thinking-indicator-dots">...</span></span>`;
-        messageItem.classList.add('thinking');
+        messageItem.classList.add(message.isThinking ? 'thinking' : 'streaming');
     } else {
+        // 切回仍在后台运行且已经产生内容的会话时，恢复可中止的流式状态。
+        if (isActiveStreamRequest) {
+            messageItem.classList.add('streaming');
+        }
         let textToRender = "";
         if (typeof message.content === 'string') {
             textToRender = message.content;
@@ -2999,9 +3016,9 @@ async function renderMessage(message, isInitialLoad = false, appendToDom = true,
          }
      }
      */
-    if (isInitialLoad && message.isThinking) {
-        // This case should ideally not happen if thinking messages aren't persisted.
-        // If it does, remove the transient thinking message.
+    if (isInitialLoad && message.isThinking && !isActiveStreamRequest) {
+        // 仅清理没有对应活动请求的陈旧思考占位。
+        // 活动异步请求可能在用户切换 Agent/话题后重新加载，不能在这里误删。
         const currentChatHistoryArray = mainRendererReferences.currentChatHistoryRef.get();
         const thinkingMsgIndex = currentChatHistoryArray.findIndex(m => m.id === message.id && m.isThinking);
         if (thinkingMsgIndex > -1) {
@@ -3049,12 +3066,20 @@ async function finalizeStreamedMessage(messageId, finishReason, context, finalPa
     // 1) prepareFinalTextForRender() 在 streamManager 内对完整文本应用前端正则与深度；
     // 2) parseFull() 只执行一次完整管线；
     // 3) mermaid 也只在该最终渲染路径中执行一次。
-    await streamManager.finalizeStreamedMessage(messageId, finishReason, context, finalPayload);
+    // 必须透传最终落盘结果，Flowlock 等消息级状态机需要解析完整原始文本。
+    const finalizedMessage = await streamManager.finalizeStreamedMessage(
+        messageId,
+        finishReason,
+        context,
+        finalPayload
+    );
 
     const finalMessage = mainRendererReferences.currentChatHistoryRef.get().find(m => m.id === messageId);
     if (finalMessage) {
         extractAndPushDesktopBlocks(finalMessage.content);
     }
+
+    return finalizedMessage;
 }
 
 
