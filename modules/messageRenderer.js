@@ -12,7 +12,7 @@ const toolResultFullContentMap = new Map(); // placeholderId -> { raw: string, f
 let toolResultContentIdCounter = 0;
 
 // 🟢 完整 Markdown → HTML 渲染缓存：只缓存 raw HTML 字符串，不缓存 DOM / 后处理结果 / message 对象。
-const RENDER_PIPELINE_VERSION = '2026-06-11-render-cache-v1';
+const RENDER_PIPELINE_VERSION = '2026-07-26-dollar-guard-v3';
 const RENDER_HTML_CACHE_MAX_BYTES = 20 * 1024 * 1024;
 const RENDER_HTML_CACHE_MAX_ENTRIES = 500;
 const RENDER_HTML_CACHE_MAX_SINGLE_BYTES = 1024 * 1024;
@@ -79,22 +79,24 @@ function protectLatexBlocks(text) {
 
         const hasExplicitMathSignal = /\\|[\^_=+\-*/<>]|[A-Za-z]\s*\(|\b(?:lim|sum|int|frac|sqrt|alpha|beta|gamma|theta|lambda|mu|sigma|pi|infty)\b/i.test(trimmedContent);
         const isSimpleNumericMath = /^[+-]?(?:\d+(?:[.,]\d+)*|\.\d+)(?:\s*(?:%|\\%|‰|°))?$/.test(trimmedContent);
+        const isSimpleIdentifierMath = /^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmedContent);
 
-        // 跳过价格、价格单位、Shell 变量、模板字符串与 Markdown 表格跨列误匹配。
-        // 但 `$1$`、`$20\%$`、`$2^n$`、`$1/2$` 这类明确闭合的行内数学应放行；
-        // 真正的价格通常是 `$123` 后接普通文本而不是闭合 `$`，不会走到这里。
-        // 否则 Markdown 会先吞掉 `\%`，后续 KaTeX 可能把相邻 `$...$` 错配成红色错误文本。
+        // 数字开头的候选仍需严格检查，避免把价格与价格单位误当作公式。
+        // `$1$`、`$20\%$`、`$2^n$`、`$1/2$` 等明确闭合数学保持放行；
+        // 真正的价格通常是 `$123` 后接普通文本而没有闭合 `$`。
         if (/^\d/.test(trimmedContent) && !hasExplicitMathSignal && !isSimpleNumericMath) return false;
+
+        // 路径、模板表达式与 Markdown 表格跨列候选继续排除。
+        // 闭合的 `$x$`、`$n$`、`$abc$` 视为标准行内数学；
+        // 不闭合的 `$PATH` 不会被扫描器选为候选，因此无需按标识符统一拒绝。
         if (trimmedContent.startsWith('/')) return false;
-        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmedContent)) return false;
         if (trimmedContent.startsWith('{') && trimmedContent.endsWith('}')) return false;
         if (trimmedContent.includes('|')) return false;
 
-        // 放行带有明确数学信号的单美元公式，以及 `$1$`、`$2$` 这类明确闭合的纯数字公式。
-        return hasExplicitMathSignal || isSimpleNumericMath;
+        return hasExplicitMathSignal || isSimpleNumericMath || isSimpleIdentifierMath;
     };
 
-    const protectInlineDollarMath = (source) => {
+    const protectInlineDollarMathInText = (source) => {
         let result = '';
         let index = 0;
 
@@ -156,6 +158,26 @@ function protectLatexBlocks(text) {
             index = closeIndex + 1;
         }
 
+        return result;
+    };
+
+    const protectInlineDollarMath = (source) => {
+        // HTML 标签是硬边界：美元定界符只能在同一个纯文本片段内闭合。
+        // 这既避免读取 style/data 属性中的 `$`，也避免把
+        // `<strong>$35.50</strong> ... <span>$12.25</span>` 跨元素配成公式。
+        // 仅识别形似真实标签的片段，数学表达式中的比较运算符 `<`、`>` 仍留在文本中。
+        const htmlTagRegex = /<!--[\s\S]*?-->|<\/?[A-Za-z][A-Za-z0-9:-]*(?:\s+(?:"[^"]*"|'[^']*'|[^'"<>])*)?\s*\/?>/g;
+        let result = '';
+        let cursor = 0;
+        let tagMatch;
+
+        while ((tagMatch = htmlTagRegex.exec(source)) !== null) {
+            result += protectInlineDollarMathInText(source.slice(cursor, tagMatch.index));
+            result += tagMatch[0];
+            cursor = tagMatch.index + tagMatch[0].length;
+        }
+
+        result += protectInlineDollarMathInText(source.slice(cursor));
         return result;
     };
 
@@ -248,7 +270,8 @@ function protectLatexBlocks(text) {
 
     // 4. 保护安全的 $...$ (inline math)。
     // 为避免 KaTeX auto-render 的单美元误触发，这里把安全单美元公式转换为 \( ... \) 形式交给后处理渲染。
-    // 例如 $O(L^2) \to O(1)$ 会渲染；$10、$PATH、${value}、表格跨列 $...|...$ 不会触发。
+    // 闭合的 $x$、$n$、$abc$ 与 $O(L^2) \to O(1)$ 会渲染；
+    // 不闭合的 $10、$PATH、模板 ${value}、表格跨列 $...|...$ 不会触发。
     // 行内公式内部允许出现转义美元 \$，并且不安全价格候选不会吞掉后续真实公式。
     processed = protectInlineDollarMath(processed);
 
