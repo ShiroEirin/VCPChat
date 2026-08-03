@@ -7,8 +7,9 @@
     "start": "electron .",
     "start:desktop": "electron . --desktop-only",
     "start:rag-observer": "electron . --rag-observer-only",
-    "pack": "electron-builder --dir",
-    "dist": "electron-builder"
+    "build": "node rust_chat_data_service/build-runtime.js",
+    "pack": "npm run build && electron-builder --dir",
+    "dist": "npm run build && electron-builder"
   },
   "keywords": [
     "VCP",
@@ -64,7 +65,7 @@
     "pdf-poppler": "^0.2.1",
     "portfinder": "^1.0.37",
     "puppeteer": "^24.15.0",
-    "sharp": "^0.34.2",
+    "sharp": "^0.35.3",
     "stylelint": "^16.25.0",
     "tesseract.js": "^6.0.1",
     "three": "^0.178.0",
@@ -81,6 +82,9 @@
   "build": {
     "appId": "com.vcp.chatdesktop",
     "productName": "VCP聊天客户端",
+    "asarUnpack": [
+      "modules/services/chatDataService/bin/**/*"
+    ],
     "files": [
       "main.js",
       "preload.js",
@@ -90,6 +94,10 @@
       "image-viewer.html",
       "text-viewer.html",
       "style.css",
+      "styles/**/*",
+      "VCPDistributedServer/frontend-plugin-loader.js",
+      "VCPDistributedServer/Plugin/VChatDynamicWallpaper/**/*",
+      "VCPDistributedServer/Plugin/VChatAutoTTS/**/*",
       "assets/",
       "modules/**/*",
       "vendor/**/*",

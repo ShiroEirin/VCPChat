@@ -12,7 +12,7 @@ const toolResultFullContentMap = new Map(); // placeholderId -> { raw: string, f
 let toolResultContentIdCounter = 0;
 
 // 🟢 完整 Markdown → HTML 渲染缓存：只缓存 raw HTML 字符串，不缓存 DOM / 后处理结果 / message 对象。
-const RENDER_PIPELINE_VERSION = '2026-06-11-render-cache-v1';
+const RENDER_PIPELINE_VERSION = '2026-07-26-dollar-guard-v3';
 const RENDER_HTML_CACHE_MAX_BYTES = 20 * 1024 * 1024;
 const RENDER_HTML_CACHE_MAX_ENTRIES = 500;
 const RENDER_HTML_CACHE_MAX_SINGLE_BYTES = 1024 * 1024;
@@ -79,22 +79,24 @@ function protectLatexBlocks(text) {
 
         const hasExplicitMathSignal = /\\|[\^_=+\-*/<>]|[A-Za-z]\s*\(|\b(?:lim|sum|int|frac|sqrt|alpha|beta|gamma|theta|lambda|mu|sigma|pi|infty)\b/i.test(trimmedContent);
         const isSimpleNumericMath = /^[+-]?(?:\d+(?:[.,]\d+)*|\.\d+)(?:\s*(?:%|\\%|‰|°))?$/.test(trimmedContent);
+        const isSimpleIdentifierMath = /^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmedContent);
 
-        // 跳过价格、价格单位、Shell 变量、模板字符串与 Markdown 表格跨列误匹配。
-        // 但 `$1$`、`$20\%$`、`$2^n$`、`$1/2$` 这类明确闭合的行内数学应放行；
-        // 真正的价格通常是 `$123` 后接普通文本而不是闭合 `$`，不会走到这里。
-        // 否则 Markdown 会先吞掉 `\%`，后续 KaTeX 可能把相邻 `$...$` 错配成红色错误文本。
+        // 数字开头的候选仍需严格检查，避免把价格与价格单位误当作公式。
+        // `$1$`、`$20\%$`、`$2^n$`、`$1/2$` 等明确闭合数学保持放行；
+        // 真正的价格通常是 `$123` 后接普通文本而没有闭合 `$`。
         if (/^\d/.test(trimmedContent) && !hasExplicitMathSignal && !isSimpleNumericMath) return false;
+
+        // 路径、模板表达式与 Markdown 表格跨列候选继续排除。
+        // 闭合的 `$x$`、`$n$`、`$abc$` 视为标准行内数学；
+        // 不闭合的 `$PATH` 不会被扫描器选为候选，因此无需按标识符统一拒绝。
         if (trimmedContent.startsWith('/')) return false;
-        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(trimmedContent)) return false;
         if (trimmedContent.startsWith('{') && trimmedContent.endsWith('}')) return false;
         if (trimmedContent.includes('|')) return false;
 
-        // 放行带有明确数学信号的单美元公式，以及 `$1$`、`$2$` 这类明确闭合的纯数字公式。
-        return hasExplicitMathSignal || isSimpleNumericMath;
+        return hasExplicitMathSignal || isSimpleNumericMath || isSimpleIdentifierMath;
     };
 
-    const protectInlineDollarMath = (source) => {
+    const protectInlineDollarMathInText = (source) => {
         let result = '';
         let index = 0;
 
@@ -156,6 +158,26 @@ function protectLatexBlocks(text) {
             index = closeIndex + 1;
         }
 
+        return result;
+    };
+
+    const protectInlineDollarMath = (source) => {
+        // HTML 标签是硬边界：美元定界符只能在同一个纯文本片段内闭合。
+        // 这既避免读取 style/data 属性中的 `$`，也避免把
+        // `<strong>$35.50</strong> ... <span>$12.25</span>` 跨元素配成公式。
+        // 仅识别形似真实标签的片段，数学表达式中的比较运算符 `<`、`>` 仍留在文本中。
+        const htmlTagRegex = /<!--[\s\S]*?-->|<\/?[A-Za-z][A-Za-z0-9:-]*(?:\s+(?:"[^"]*"|'[^']*'|[^'"<>])*)?\s*\/?>/g;
+        let result = '';
+        let cursor = 0;
+        let tagMatch;
+
+        while ((tagMatch = htmlTagRegex.exec(source)) !== null) {
+            result += protectInlineDollarMathInText(source.slice(cursor, tagMatch.index));
+            result += tagMatch[0];
+            cursor = tagMatch.index + tagMatch[0].length;
+        }
+
+        result += protectInlineDollarMathInText(source.slice(cursor));
         return result;
     };
 
@@ -248,7 +270,8 @@ function protectLatexBlocks(text) {
 
     // 4. 保护安全的 $...$ (inline math)。
     // 为避免 KaTeX auto-render 的单美元误触发，这里把安全单美元公式转换为 \( ... \) 形式交给后处理渲染。
-    // 例如 $O(L^2) \to O(1)$ 会渲染；$10、$PATH、${value}、表格跨列 $...|...$ 不会触发。
+    // 闭合的 $x$、$n$、$abc$ 与 $O(L^2) \to O(1)$ 会渲染；
+    // 不闭合的 $10、$PATH、模板 ${value}、表格跨列 $...|...$ 不会触发。
     // 行内公式内部允许出现转义美元 \$，并且不安全价格候选不会吞掉后续真实公式。
     processed = protectInlineDollarMath(processed);
 
@@ -295,8 +318,8 @@ const HTML_FENCE_CHECK_REGEX = /```\w*\n<!DOCTYPE html>/i;
 const MERMAID_CODE_REGEX = /<code.*?>\s*(flowchart|graph|mermaid)\s+([\s\S]*?)<\/code>/gi;
 const MERMAID_FENCE_REGEX = /```(mermaid|flowchart|graph)[^\S\n]*\n([\s\S]*?)```/g;
 const CODE_FENCE_REGEX = /```[^\n]*([\s\S]*?)```/g;
-const THOUGHT_CHAIN_REGEX = /\[--- VCP元思考链(?::\s*"([^"]*)")?\s*---\]([\s\S]*?)\[--- 元思考链结束 ---\]/gs;
-const CONVENTIONAL_THOUGHT_REGEX = /<think(?:ing)?>([\s\S]*?)<\/think(?:ing)?>/gi;
+const THOUGHT_CHAIN_REGEX = /^[ \t]*\[--- VCP元思考链(?::\s*"([^"]*)")?\s*---\][ \t]*\r?\n([\s\S]*?)^[ \t]*\[--- 元思考链结束 ---\][ \t]*(?:\r?\n|$)/gm;
+const CONVENTIONAL_THOUGHT_REGEX = /^[ \t]*<think(?:ing)?>[ \t]*\r?\n([\s\S]*?)^[ \t]*<\/think(?:ing)?>[ \t]*(?:\r?\n|$)/gim;
 const ROLE_DIVIDER_REGEX = /<<<\[(END_)?ROLE_DIVIDE_(SYSTEM|ASSISTANT|USER)\]>>>/g;
 const DESKTOP_PUSH_REGEX = /(?<!`)<<<\[DESKTOP_PUSH\]>>>([\s\S]*?)<<<\[DESKTOP_PUSH_END\]>>>(?!`)/gs;
 const DESKTOP_PUSH_PARTIAL_REGEX = /(?<!`)<<<\[DESKTOP_PUSH\]>>>([\s\S]*)$/s; // 流式传输中未闭合的情况
@@ -368,7 +391,7 @@ function replaceToolRequestBlocks(text, replacer) {
         const fullMatch = text.slice(startIndex, endIndex);
         const content = text.slice(contentStart, endIndex - TOOL_END_MARKER.length);
         result += text.slice(cursor, startIndex);
-        result += replacer(fullMatch, content);
+        result += replacer(fullMatch, content, startIndex, endIndex);
         cursor = endIndex;
     }
 
@@ -1305,7 +1328,7 @@ function extractSpeakableTextFromContentElement(contentElement) {
 
     const contentClone = contentElement.cloneNode(true);
     contentClone.querySelectorAll(
-        '.vcp-tool-use-bubble, .vcp-tool-result-bubble, .vcp-tool-call-summary-bubble, .maid-diary-bubble, .vcp-role-divider, .vcp-thought-chain-bubble, style, script'
+        '.vcp-tool-use-bubble, .vcp-tool-result-bubble, .vcp-tool-call-summary-bubble, .vcp-flowlock-bubble, .maid-diary-bubble, .vcp-role-divider, .vcp-thought-chain-bubble, style, script'
     ).forEach(el => el.remove());
 
     return (contentClone.innerText || '')
@@ -1386,19 +1409,9 @@ function processAssistantScopedHtmlContent(content, scopeId, messageItem = null)
         return placeholder;
     });
 
-    // 🔴 保护「始」「末」与「始ESCAPE」「末ESCAPE」标记区域及其变体。
-    // 这些标记内的内容是工具参数，可能包含任意 HTML（含 <style>），不应被提取。
-    // 注意：ESCAPE 必须优先按「末ESCAPE」闭合，不能被内部普通「末」打断。
-    textWithProtectedBlocks = textWithProtectedBlocks.replace(/(?:[「{]始[Ee][Ss][Cc][Aa][Pp][Ee][」}])[\s\S]*?(?:(?:[「{]末[Ee][Ss][Cc][Aa][Pp][Ee][」}])|$)/gi, (match) => {
-        const placeholder = `__VCP_STYLE_PROTECT_${protectedBlocks.length}__`;
-        protectedBlocks.push(match);
-        return placeholder;
-    });
-    textWithProtectedBlocks = textWithProtectedBlocks.replace(/(?:[「{]始[」}])[\s\S]*?(?:(?:[「{]末[」}])|$)/g, (match) => {
-        const placeholder = `__VCP_STYLE_PROTECT_${protectedBlocks.length}__`;
-        protectedBlocks.push(match);
-        return placeholder;
-    });
+    // 「始」「末」与「始ESCAPE」「末ESCAPE」只在工具请求围栏内部作为字段边界语法。
+    // 工具请求块已在上一步整体保护；这里不再扫描工具围栏外的裸始末标记，
+    // 避免普通聊天提及这些标记时误保护大段正文或影响 <style> 提取边界。
 
     // 保护桌面推送块（必须在代码块之前，因为推送块可能包含代码围栏）。
     textWithProtectedBlocks = textWithProtectedBlocks.replace(DESKTOP_PUSH_REGEX, (match) => {
@@ -1460,43 +1473,13 @@ function ensureHtmlFenced(text) {
         return text;
     }
 
-    // 🟢 构建「始」「末」与「始ESCAPE」「末ESCAPE」及其变体保护区域
+    // 🟢 只保护工具请求围栏区域内的 HTML。
+    // 「始」「末」标记不再作为全局保护区入口，避免普通正文提及该语法时导致 HTML fenced 边界误判。
     const protectedRanges = [];
-    const startRegex = /([「{]始(?:[Ee][Ss][Cc][Aa][Pp][Ee])?[」}])/gi;
-    let searchStart = 0;
-
-    while (true) {
-        startRegex.lastIndex = searchStart;
-        const startMatch = startRegex.exec(text);
-        if (!startMatch) break;
-
-        const startPos = startMatch.index;
-        const startMarker = startMatch[0];
-
-        const isEscape = /escape/i.test(startMarker);
-        let endRegex;
-        if (isEscape) {
-            endRegex = /[「{]末[Ee][Ss][Cc][Aa][Pp][Ee][」}]/gi;
-        } else {
-            endRegex = /[「{]末[」}]/g;
-        }
-
-        const contentStart = startPos + startMarker.length;
-        endRegex.lastIndex = contentStart;
-        const endMatch = endRegex.exec(text);
-
-        if (!endMatch) {
-            // 未闭合的开始标记，保护到文本末尾（流式传输场景）
-            protectedRanges.push({ start: startPos, end: text.length });
-            break;
-        }
-
-        const endPos = endMatch.index;
-        const endMarker = endMatch[0];
-
-        protectedRanges.push({ start: startPos, end: endPos + endMarker.length });
-        searchStart = endPos + endMarker.length;
-    }
+    replaceToolRequestBlocks(text, (match, content, startIndex, endIndex) => {
+        protectedRanges.push({ start: startIndex, end: endIndex });
+        return match;
+    });
 
     // 🟢 检查位置是否在保护区域内
     const isProtected = (index) => {
@@ -1522,7 +1505,7 @@ function ensureHtmlFenced(text) {
 
         const block = text.substring(startIndex, endIndex + htmlCloseTag.length);
 
-        // 🔴 核心修复：如果在「始」「末」保护区内，直接添加不封装
+        // 🔴 核心修复：如果在工具请求保护区内，直接添加不封装
         if (isProtected(startIndex)) {
             result += block;
             lastIndex = endIndex + htmlCloseTag.length;
@@ -1792,12 +1775,133 @@ function parseFullMarkdown(text, options = {}) {
     return renderMarkdownToHtml(text, options);
 }
 
+/**
+ * 查找流式文本中最后一个尚未闭合的代码围栏。
+ * 返回围栏前正文、语言名和原始代码，使流式渲染不再依赖 marked 对残缺围栏的容错行为。
+ */
+function findUnclosedStreamCodeFence(text) {
+    if (typeof text !== 'string' || (!text.includes('```') && !text.includes('~~~'))) {
+        return null;
+    }
+
+    const normalizedText = text.replace(/\r\n?/g, '\n');
+    const lines = normalizedText.split('\n');
+    let activeFence = null;
+    let offset = 0;
+
+    for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+        const line = lines[lineIndex];
+        const match = line.match(/^[ \t]{0,3}(`{3,}|~{3,})(.*)$/);
+
+        if (match) {
+            const marker = match[1];
+            const markerChar = marker[0];
+            const trailingText = match[2] || '';
+
+            if (!activeFence) {
+                const infoString = trailingText.trim();
+                const language = (infoString.split(/\s+/)[0] || '')
+                    .replace(/[^\w#+.-]/g, '');
+
+                activeFence = {
+                    char: markerChar,
+                    length: marker.length,
+                    startOffset: offset,
+                    contentOffset: offset + line.length + (lineIndex < lines.length - 1 ? 1 : 0),
+                    language
+                };
+            } else if (
+                markerChar === activeFence.char &&
+                marker.length >= activeFence.length &&
+                trailingText.trim() === ''
+            ) {
+                activeFence = null;
+            }
+        }
+
+        offset += line.length;
+        if (lineIndex < lines.length - 1) offset += 1;
+    }
+
+    if (!activeFence) return null;
+
+    return {
+        prefix: normalizedText.slice(0, activeFence.startOffset),
+        code: normalizedText.slice(activeFence.contentOffset),
+        language: activeFence.language
+    };
+}
+
+function findUnclosedStreamToolRequest(text) {
+    if (typeof text !== 'string' || !text.includes(TOOL_START_MARKER)) {
+        return null;
+    }
+
+    let cursor = 0;
+    while (cursor < text.length) {
+        const startIndex = text.indexOf(TOOL_START_MARKER, cursor);
+        if (startIndex === -1) return null;
+
+        if (isBacktickWrappedMarker(text, startIndex, TOOL_START_MARKER)) {
+            cursor = startIndex + TOOL_START_MARKER.length;
+            continue;
+        }
+
+        const contentStart = startIndex + TOOL_START_MARKER.length;
+        const endIndex = findToolRequestEnd(text, contentStart);
+        if (endIndex === -1) {
+            return {
+                prefix: text.slice(0, startIndex),
+                request: text.slice(startIndex)
+            };
+        }
+
+        cursor = endIndex;
+    }
+
+    return null;
+}
+
 function parseStreamTailMarkdown(text) {
     const markedInstance = mainRendererReferences.markedInstance;
     if (!markedInstance) return escapeHtml(text);
 
     const processedText = preprocessStreamTailContent(text);
-    return markedInstance.parse(processedText);
+
+    // 工具请求尚未闭合时，完整管线还不能把它转换为安全的工具气泡。
+    // 这里必须先把整个请求尾部作为纯文本封印，禁止参数中的 HTML 在任一流式帧成为真实 DOM。
+    const unclosedToolRequest = findUnclosedStreamToolRequest(processedText);
+    if (unclosedToolRequest) {
+        const prefixHtml = unclosedToolRequest.prefix
+            ? markedInstance.parse(unclosedToolRequest.prefix)
+            : '';
+        return `${prefixHtml}<pre class="vcp-stream-tool-request-sealed">${escapeHtml(unclosedToolRequest.request)}</pre>`;
+    }
+
+    const unclosedFence = findUnclosedStreamCodeFence(processedText);
+
+    if (!unclosedFence) {
+        return markedInstance.parse(processedText);
+    }
+
+    const prefixHtml = unclosedFence.prefix
+        ? markedInstance.parse(unclosedFence.prefix)
+        : '';
+    const languageClass = unclosedFence.language
+        ? ` language-${escapeHtml(unclosedFence.language)}`
+        : '';
+    const codeLines = unclosedFence.code.replace(/\r\n?/g, '\n').split('\n');
+    const completedLineCount = Math.max(0, codeLines.length - 1);
+    const lineHtml = codeLines.map((lineText, lineIndex) => {
+        const escapedLine = lineText ? escapeHtml(lineText) : '&#8203;';
+        const completedAttribute = lineIndex < completedLineCount
+            ? ' data-vcp-stream-code-completed="true"'
+            : '';
+        return `<span class="vcp-stream-code-line" data-vcp-key="stream-code-line-${lineIndex}" data-vcp-stream-code-line="${lineIndex}"${completedAttribute}>${escapedLine}</span>`;
+    }).join('');
+
+    // 流式解析阶段直接输出稳定的逐行 DOM，避免每帧在 streamManager 中重建全部代码行。
+    return `${prefixHtml}<pre class="vcp-stream-code-block"><code class="vcp-stream-code-lines${languageClass}">${lineHtml}</code></pre>`;
 }
 
 function prepareFinalTextForRender(messageId, rawText, role = 'assistant', historyOverride = null) {
@@ -2197,6 +2301,12 @@ function initializeMessageRenderer(refs) {
         applyContentProcessors: contentProcessor.applyContentProcessors,
         transformSpecialBlocks,
         ensureHtmlFenced,
+        transformFlowlockBlocks: (text) => {
+            if (!window.flowlockProtocol || typeof window.flowlockProtocol.transformForRender !== 'function') {
+                return text;
+            }
+            return window.flowlockProtocol.transformForRender(text);
+        },
         transformMermaidPlaceholders: (text) => {
             let transformed = text.replace(MERMAID_CODE_REGEX, (match, lang, code) => {
                 const tempEl = document.createElement('textarea');
@@ -2379,6 +2489,7 @@ function initializeMessageRenderer(refs) {
         processRenderedContent: wrappedProcessRenderedContent,
         runTextHighlights: contentProcessor.highlightAllPatternsInMessage,
         preprocessFullContent: preprocessFullContent,
+        findToolRequestEnd: (text, startIndex) => findToolRequestEnd(text, startIndex),
         removeSpeakerTags: contentProcessor.removeSpeakerTags,
         ensureNewlineAfterCodeBlock: contentProcessor.ensureNewlineAfterCodeBlock,
         ensureSpaceAfterTilde: contentProcessor.ensureSpaceAfterTilde,
@@ -2507,6 +2618,236 @@ function setUserAvatarColor(color) { // For the user's global avatar
     const globalSettings = mainRendererReferences.globalSettingsRef.get();
     mainRendererReferences.globalSettingsRef.set({ ...globalSettings, userAvatarCalculatedColor: color });
 }
+function formatAudioTime(seconds) {
+    if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
+
+    const totalSeconds = Math.floor(seconds);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const remainingSeconds = totalSeconds % 60;
+
+    return hours > 0
+        ? `${hours}:${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`
+        : `${minutes}:${String(remainingSeconds).padStart(2, '0')}`;
+}
+
+function getAudioDisplayName(audio) {
+    if (audio.dataset.audioTitle) return audio.dataset.audioTitle;
+
+    const source = audio.currentSrc || audio.getAttribute('src') || audio.querySelector('source')?.src || '';
+    if (!source) return '音频';
+
+    try {
+        const url = new URL(source, window.location.href);
+        const fileName = decodeURIComponent(url.pathname.split('/').filter(Boolean).pop() || '');
+        return fileName || '音频';
+    } catch (error) {
+        return source.split(/[\\/]/).pop()?.split('?')[0] || '音频';
+    }
+}
+
+function createAudioControlButton(className, label, iconMarkup) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `vcp-audio-button ${className}`;
+    button.setAttribute('aria-label', label);
+    button.title = label;
+    button.innerHTML = iconMarkup;
+    return button;
+}
+
+function enhanceAudioPlayers(container) {
+    if (!container) return;
+
+    const playIcon = `
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M8 5.7v12.6a1 1 0 0 0 1.53.85l9.2-6.3a1 1 0 0 0 0-1.7l-9.2-6.3A1 1 0 0 0 8 5.7Z"></path>
+        </svg>`;
+    const pauseIcon = `
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M7 5.5A1.5 1.5 0 0 1 8.5 4h1A1.5 1.5 0 0 1 11 5.5v13A1.5 1.5 0 0 1 9.5 20h-1A1.5 1.5 0 0 1 7 18.5v-13Zm6 0A1.5 1.5 0 0 1 14.5 4h1A1.5 1.5 0 0 1 17 5.5v13a1.5 1.5 0 0 1-1.5 1.5h-1a1.5 1.5 0 0 1-1.5-1.5v-13Z"></path>
+        </svg>`;
+    const volumeIcon = `
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 9.5v5A1.5 1.5 0 0 0 5.5 16H8l4.2 3.15A.5.5 0 0 0 13 18.75V5.25a.5.5 0 0 0-.8-.4L8 8H5.5A1.5 1.5 0 0 0 4 9.5Zm12.2-.7a1 1 0 0 1 1.4 0 4.5 4.5 0 0 1 0 6.4 1 1 0 1 1-1.4-1.4 2.5 2.5 0 0 0 0-3.6 1 1 0 0 1 0-1.4Zm2.65-2.65a1 1 0 0 1 1.4 0 8.25 8.25 0 0 1 0 11.7 1 1 0 0 1-1.4-1.4 6.25 6.25 0 0 0 0-8.9 1 1 0 0 1 0-1.4Z"></path>
+        </svg>`;
+    const mutedIcon = `
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M4 9.5v5A1.5 1.5 0 0 0 5.5 16H8l4.2 3.15a.5.5 0 0 0 .8-.4V5.25a.5.5 0 0 0-.8-.4L8 8H5.5A1.5 1.5 0 0 0 4 9.5Zm12.3.1a1 1 0 0 1 1.4 0l1.3 1.3 1.3-1.3a1 1 0 1 1 1.4 1.4l-1.3 1.3 1.3 1.3a1 1 0 0 1-1.4 1.4L19 13.7 17.7 15a1 1 0 0 1-1.4-1.4l1.3-1.3-1.3-1.3a1 1 0 0 1 0-1.4Z"></path>
+        </svg>`;
+    const downloadIcon = `
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 3a1 1 0 0 1 1 1v8.6l2.3-2.3a1 1 0 1 1 1.4 1.4l-4 4a1 1 0 0 1-1.4 0l-4-4a1 1 0 0 1 1.4-1.4l2.3 2.3V4a1 1 0 0 1 1-1ZM5 18a1 1 0 0 1 1 1v1h12v-1a1 1 0 1 1 2 0v1.5A1.5 1.5 0 0 1 18.5 22h-13A1.5 1.5 0 0 1 4 20.5V19a1 1 0 0 1 1-1Z"></path>
+        </svg>`;
+
+    container.querySelectorAll('audio[controls]:not([data-vcp-audio-enhanced])').forEach((audio) => {
+        audio.dataset.vcpAudioEnhanced = 'true';
+        audio.classList.add('vcp-audio-native');
+
+        const player = document.createElement('div');
+        player.className = 'vcp-audio-player';
+        player.setAttribute('role', 'group');
+        player.setAttribute('aria-label', `音频播放器：${getAudioDisplayName(audio)}`);
+
+        const playButton = createAudioControlButton('vcp-audio-play', '播放', playIcon);
+        const content = document.createElement('div');
+        content.className = 'vcp-audio-content';
+
+        const header = document.createElement('div');
+        header.className = 'vcp-audio-header';
+        const title = document.createElement('span');
+        title.className = 'vcp-audio-title';
+        title.textContent = getAudioDisplayName(audio);
+        title.title = title.textContent;
+        const time = document.createElement('span');
+        time.className = 'vcp-audio-time';
+        time.textContent = '0:00 / 0:00';
+        header.append(title, time);
+
+        const progress = document.createElement('input');
+        progress.type = 'range';
+        progress.className = 'vcp-audio-range vcp-audio-progress';
+        progress.min = '0';
+        progress.max = '100';
+        progress.step = 'any';
+        progress.value = '0';
+        progress.setAttribute('aria-label', '播放进度');
+
+        const actions = document.createElement('div');
+        actions.className = 'vcp-audio-actions';
+        const muteButton = createAudioControlButton('vcp-audio-mute', '静音', volumeIcon);
+        const volume = document.createElement('input');
+        volume.type = 'range';
+        volume.className = 'vcp-audio-range vcp-audio-volume';
+        volume.min = '0';
+        volume.max = '1';
+        volume.step = '0.05';
+        volume.value = String(audio.volume);
+        volume.setAttribute('aria-label', '音量');
+
+        const download = document.createElement('a');
+        download.className = 'vcp-audio-button vcp-audio-download';
+        download.href = audio.currentSrc || audio.getAttribute('src') || audio.querySelector('source')?.src || '#';
+        download.download = title.textContent;
+        download.target = '_blank';
+        download.rel = 'noopener noreferrer';
+        download.setAttribute('aria-label', '下载音频');
+        download.title = '下载音频';
+        download.innerHTML = downloadIcon;
+
+        actions.append(muteButton, volume, download);
+        content.append(header, progress, actions);
+
+        const parent = audio.parentNode;
+        parent.insertBefore(player, audio);
+        player.append(audio, playButton, content);
+        audio.controls = false;
+        audio.preload = audio.preload || 'metadata';
+
+        const setRangeFill = (range, value) => {
+            range.style.setProperty('--vcp-range-value', `${Math.max(0, Math.min(100, value))}%`);
+        };
+        const updateProgress = () => {
+            const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
+            const ratio = duration > 0 ? (audio.currentTime / duration) * 100 : 0;
+            progress.value = String(ratio);
+            progress.setAttribute('aria-valuetext', `${formatAudioTime(audio.currentTime)} / ${formatAudioTime(duration)}`);
+            time.textContent = `${formatAudioTime(audio.currentTime)} / ${formatAudioTime(duration)}`;
+            setRangeFill(progress, ratio);
+        };
+
+        let progressAnimationFrame = null;
+        const stopSmoothProgress = () => {
+            if (progressAnimationFrame !== null) {
+                cancelAnimationFrame(progressAnimationFrame);
+                progressAnimationFrame = null;
+            }
+        };
+        const animateSmoothProgress = () => {
+            updateProgress();
+            if (!audio.paused && !audio.ended && player.isConnected) {
+                progressAnimationFrame = requestAnimationFrame(animateSmoothProgress);
+            } else {
+                progressAnimationFrame = null;
+            }
+        };
+        const startSmoothProgress = () => {
+            if (progressAnimationFrame === null) {
+                progressAnimationFrame = requestAnimationFrame(animateSmoothProgress);
+            }
+        };
+
+        const updateVolume = () => {
+            const effectiveVolume = audio.muted ? 0 : audio.volume;
+            volume.value = String(effectiveVolume);
+            setRangeFill(volume, effectiveVolume * 100);
+            muteButton.innerHTML = effectiveVolume === 0 ? mutedIcon : volumeIcon;
+            muteButton.setAttribute('aria-label', effectiveVolume === 0 ? '取消静音' : '静音');
+            muteButton.title = effectiveVolume === 0 ? '取消静音' : '静音';
+        };
+        const updatePlaybackState = () => {
+            const isPlaying = !audio.paused && !audio.ended;
+            player.classList.toggle('is-playing', isPlaying);
+            playButton.innerHTML = isPlaying ? pauseIcon : playIcon;
+            playButton.setAttribute('aria-label', isPlaying ? '暂停' : '播放');
+            playButton.title = isPlaying ? '暂停' : '播放';
+
+            if (isPlaying) {
+                startSmoothProgress();
+            } else {
+                stopSmoothProgress();
+                updateProgress();
+            }
+        };
+
+        playButton.addEventListener('click', () => {
+            if (audio.paused || audio.ended) {
+                document.querySelectorAll('audio.vcp-audio-native').forEach((otherAudio) => {
+                    if (otherAudio !== audio && !otherAudio.paused) otherAudio.pause();
+                });
+                audio.play().catch(() => player.classList.add('has-error'));
+            } else {
+                audio.pause();
+            }
+        });
+        progress.addEventListener('input', () => {
+            if (Number.isFinite(audio.duration) && audio.duration > 0) {
+                audio.currentTime = (Number(progress.value) / 100) * audio.duration;
+            }
+        });
+        muteButton.addEventListener('click', () => {
+            audio.muted = !audio.muted;
+            if (!audio.muted && audio.volume === 0) audio.volume = 0.7;
+            updateVolume();
+        });
+        volume.addEventListener('input', () => {
+            audio.volume = Number(volume.value);
+            audio.muted = audio.volume === 0;
+            updateVolume();
+        });
+
+        audio.addEventListener('loadedmetadata', updateProgress);
+        audio.addEventListener('durationchange', updateProgress);
+        audio.addEventListener('timeupdate', updateProgress);
+        audio.addEventListener('play', updatePlaybackState);
+        audio.addEventListener('pause', updatePlaybackState);
+        audio.addEventListener('ended', updatePlaybackState);
+        audio.addEventListener('volumechange', updateVolume);
+        audio.addEventListener('waiting', () => player.classList.add('is-buffering'));
+        audio.addEventListener('playing', () => player.classList.remove('is-buffering', 'has-error'));
+        audio.addEventListener('canplay', () => player.classList.remove('is-buffering'));
+        audio.addEventListener('error', () => {
+            player.classList.remove('is-buffering');
+            player.classList.add('has-error');
+            title.textContent = '音频加载失败';
+        });
+
+        updateProgress();
+        updateVolume();
+        updatePlaybackState();
+    });
+}
+
 function getAttachmentFileVisualDescriptor(name = '', type = '') {
     const resolver = window.uiHelperFunctions?.resolveAttachmentFileVisual;
     if (typeof resolver === 'function') {
@@ -2551,6 +2892,7 @@ async function renderAttachments(message, contentDiv) {
                 attachmentElement = document.createElement('audio');
                 attachmentElement.src = att.src;
                 attachmentElement.controls = true;
+                attachmentElement.dataset.audioTitle = att.name || '音频附件';
             } else if (att.type.startsWith('video/')) {
                 attachmentElement = document.createElement('video');
                 attachmentElement.src = att.src;
@@ -2560,14 +2902,43 @@ async function renderAttachments(message, contentDiv) {
                 attachmentElement = document.createElement('a');
                 attachmentElement.href = att.src;
                 const fileVisual = getAttachmentFileVisualDescriptor(att.name, att.type);
+                const isPythonAttachment = /\.py$/i.test((att.name || '').trim())
+                    || (() => {
+                        try {
+                            return /\.py$/i.test(decodeURIComponent(new URL(att.src).pathname));
+                        } catch (error) {
+                            return false;
+                        }
+                    })();
                 attachmentElement.classList.add('message-attachment-file', `message-attachment-file--${fileVisual.kind}`);
-                attachmentElement.title = `点击打开文件: ${att.name}`;
-                attachmentElement.onclick = (e) => {
+                attachmentElement.title = isPythonAttachment
+                    ? `使用记事本打开（不会执行）: ${att.name}`
+                    : `点击打开文件: ${att.name}`;
+                attachmentElement.onclick = async (e) => {
                     e.preventDefault();
-                    if (electronAPI.sendOpenExternalLink && att.src.startsWith('file://')) {
-                        electronAPI.sendOpenExternalLink(att.src);
-                    } else {
+                    // 阻止聊天区的全局链接委托再次按系统文件关联打开同一个附件。
+                    // 对 .py 而言，二次打开可能直接触发 Python 解释器执行。
+                    e.stopPropagation();
+
+                    if (!att.src.startsWith('file://')) {
                         console.warn("Cannot open local file attachment", att.src);
+                        return;
+                    }
+
+                    if (isPythonAttachment) {
+                        try {
+                            const result = await electronAPI.openPythonAttachmentInTextEditor?.(att.src);
+                            if (!result?.success) {
+                                const errorMessage = result?.error || '安全文本编辑器接口不可用';
+                                console.error('[MessageRenderer] Failed to open Python attachment safely:', errorMessage);
+                                window.uiHelperFunctions?.showToastNotification?.(`无法用记事本打开 Python 附件: ${errorMessage}`, 'error');
+                            }
+                        } catch (error) {
+                            console.error('[MessageRenderer] Failed to open Python attachment safely:', error);
+                            window.uiHelperFunctions?.showToastNotification?.(`无法用记事本打开 Python 附件: ${error.message}`, 'error');
+                        }
+                    } else if (electronAPI.sendOpenExternalLink) {
+                        electronAPI.sendOpenExternalLink(att.src);
                     }
                 };
                 const iconSpan = document.createElement('span');
@@ -2638,6 +3009,10 @@ async function renderPostProcessedHtml(contentDiv, rawHtml, options = {}) {
     }
 
     if (!isStillValid()) return;
+
+    // 原生 audio 负责媒体播放，自定义控件层负责一致的主题与交互。
+    // 放在附件渲染之后，可同时覆盖 Markdown HTML 音频和消息附件音频。
+    enhanceAudioPlayers(contentDiv);
 
     if (!runHeavy) {
         if (messageItem) {
@@ -2769,10 +3144,21 @@ async function renderMessage(message, isInitialLoad = false, appendToDom = true,
         visibilityOptimizer.observeMessage(messageItem);
     }
 
-    if (message.isThinking) {
+    const isActiveStreamRequest = message.role === 'assistant'
+        && typeof streamManager.isMessageActive === 'function'
+        && streamManager.isMessageActive(message.id);
+    const messageTextIsEmpty = message.content === null
+        || message.content === undefined
+        || (typeof message.content === 'string' && message.content.trim() === '');
+
+    if (message.isThinking || (isActiveStreamRequest && messageTextIsEmpty)) {
         contentDiv.innerHTML = `<span class="thinking-indicator">${message.content || '思考中'}<span class="thinking-indicator-dots">...</span></span>`;
-        messageItem.classList.add('thinking');
+        messageItem.classList.add(message.isThinking ? 'thinking' : 'streaming');
     } else {
+        // 切回仍在后台运行且已经产生内容的会话时，恢复可中止的流式状态。
+        if (isActiveStreamRequest) {
+            messageItem.classList.add('streaming');
+        }
         let textToRender = "";
         if (typeof message.content === 'string') {
             textToRender = message.content;
@@ -3039,9 +3425,9 @@ async function renderMessage(message, isInitialLoad = false, appendToDom = true,
          }
      }
      */
-    if (isInitialLoad && message.isThinking) {
-        // This case should ideally not happen if thinking messages aren't persisted.
-        // If it does, remove the transient thinking message.
+    if (isInitialLoad && message.isThinking && !isActiveStreamRequest) {
+        // 仅清理没有对应活动请求的陈旧思考占位。
+        // 活动异步请求可能在用户切换 Agent/话题后重新加载，不能在这里误删。
         const currentChatHistoryArray = mainRendererReferences.currentChatHistoryRef.get();
         const thinkingMsgIndex = currentChatHistoryArray.findIndex(m => m.id === message.id && m.isThinking);
         if (thinkingMsgIndex > -1) {
@@ -3089,12 +3475,20 @@ async function finalizeStreamedMessage(messageId, finishReason, context, finalPa
     // 1) prepareFinalTextForRender() 在 streamManager 内对完整文本应用前端正则与深度；
     // 2) parseFull() 只执行一次完整管线；
     // 3) mermaid 也只在该最终渲染路径中执行一次。
-    await streamManager.finalizeStreamedMessage(messageId, finishReason, context, finalPayload);
+    // 必须透传最终落盘结果，Flowlock 等消息级状态机需要解析完整原始文本。
+    const finalizedMessage = await streamManager.finalizeStreamedMessage(
+        messageId,
+        finishReason,
+        context,
+        finalPayload
+    );
 
     const finalMessage = mainRendererReferences.currentChatHistoryRef.get().find(m => m.id === messageId);
     if (finalMessage) {
         extractAndPushDesktopBlocks(finalMessage.content);
     }
+
+    return finalizedMessage;
 }
 
 
@@ -3569,6 +3963,21 @@ async function renderHistoryLegacy(history, renderSessionId = getActiveRenderSes
     });
 }
 
+function refreshLayoutDependentState() {
+    const chatMessagesDiv = mainRendererReferences.chatMessagesDiv;
+    if (!chatMessagesDiv) return;
+
+    chatMessagesDiv.querySelectorAll('.message-item').forEach((messageItem) => {
+        delete messageItem.dataset.vcpMeasuredHeight;
+        messageItem.style.containIntrinsicSize = 'auto 100px';
+    });
+
+    requestAnimationFrame(() => {
+        if (!chatMessagesDiv.isConnected) return;
+        visibilityOptimizer.recheckVisibility();
+    });
+}
+
 window.messageRenderer = {
     initializeMessageRenderer,
     setCurrentSelectedItem, // Keep for renderer.js to call
@@ -3588,6 +3997,7 @@ window.messageRenderer = {
     clearChat,
     removeMessageById,
     updateMessageContent, // Expose the new function
+    refreshLayoutDependentState,
     extractSpeakableTextFromContentElement,
     clearRenderHtmlCache,
     getRenderHtmlCacheStats: () => ({
