@@ -5,9 +5,73 @@ const { marked } = require('marked');
 const mammoth = require('mammoth');
 const JSZip = require('jszip');
 const cheerio = require('cheerio');
+const hljs = require('../../vendor/highlight.min.js');
+const TurndownService = require('turndown');
 const scriptoriumPptxImportService = require('./scriptoriumPptxImportService');
 
-const IMPORTER_VERSION = 4;
+const IMPORTER_VERSION = 5;
+const MARKDOWN_DOCUMENT_STYLE = `
+.vdoc-markdown-table {
+    width: 100%;
+    margin: 1em 0;
+    border: 1px solid currentColor;
+    border-collapse: collapse;
+    border-spacing: 0;
+}
+.vdoc-markdown-table th,
+.vdoc-markdown-table td {
+    min-width: 2em;
+    padding: .45em .65em;
+    border: 1px solid currentColor;
+    text-align: left;
+    vertical-align: top;
+}
+.vdoc-markdown-table th {
+    font-weight: 600;
+    background: rgba(127, 127, 127, .12);
+}
+.vdoc-code-block {
+    margin: 1em 0;
+    padding: 1em 1.15em;
+    border: 1px solid #364150;
+    border-radius: 6px;
+    overflow: auto;
+    color: #d8dee9;
+    background: #20262e;
+    font: 10.5pt/1.6 "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+    tab-size: 4;
+    white-space: pre;
+}
+.vdoc-code-block code {
+    font: inherit;
+}
+.vdoc-code-block .hljs-comment,
+.vdoc-code-block .hljs-quote { color: #8290a3; font-style: italic; }
+.vdoc-code-block .hljs-keyword,
+.vdoc-code-block .hljs-selector-tag,
+.vdoc-code-block .hljs-literal { color: #c792ea; }
+.vdoc-code-block .hljs-string,
+.vdoc-code-block .hljs-regexp,
+.vdoc-code-block .hljs-addition,
+.vdoc-code-block .hljs-attribute { color: #a3d98b; }
+.vdoc-code-block .hljs-number,
+.vdoc-code-block .hljs-symbol,
+.vdoc-code-block .hljs-bullet { color: #f2b67a; }
+.vdoc-code-block .hljs-title,
+.vdoc-code-block .hljs-section,
+.vdoc-code-block .hljs-function { color: #82cfff; }
+.vdoc-code-block .hljs-built_in,
+.vdoc-code-block .hljs-type,
+.vdoc-code-block .hljs-class .hljs-title { color: #ffd580; }
+.vdoc-code-block .hljs-variable,
+.vdoc-code-block .hljs-template-variable,
+.vdoc-code-block .hljs-params { color: #f3a6b7; }
+.vdoc-code-block .hljs-meta,
+.vdoc-code-block .hljs-doctag { color: #7fdbca; }
+.vdoc-code-block .hljs-emphasis { font-style: italic; }
+.vdoc-code-block .hljs-strong { font-weight: 700; }
+.vdoc-code-block .hljs-deletion { color: #ff8f8f; }
+`.trim();
 const SUPPORTED_EXTENSIONS = new Set([
     '.html', '.htm', '.md', '.markdown', '.txt', '.rtf', '.docx', '.pptx',
 ]);
@@ -56,6 +120,57 @@ function restoreMarkdownMath(html, placeholders) {
     return restored;
 }
 
+function normalizeMarkdownDocumentHtml(html) {
+    const $ = cheerio.load(
+        `<main data-vdoc-markdown-root>${String(html || '')}</main>`,
+        null,
+        false
+    );
+    const root = $('main[data-vdoc-markdown-root]');
+    let styledContent = false;
+
+    root.find('table').each((_index, table) => {
+        $(table).addClass('vdoc-markdown-table');
+        styledContent = true;
+    });
+
+    root.find('pre > code').each((_index, code) => {
+        const codeElement = $(code);
+        const pre = codeElement.parent();
+        const source = codeElement.text();
+        const declaredLanguage = String(
+            codeElement.attr('class')?.match(/(?:^|\s)language-([^\s]+)/)?.[1] || ''
+        ).trim().toLowerCase();
+
+        const supportedLanguage = declaredLanguage
+            && hljs.getLanguage(declaredLanguage)
+            ? declaredLanguage
+            : 'plaintext';
+        // 未声明或无法识别的围栏语言按纯文本处理。自动猜测会把普通文字
+        // 误判为 SCSS、SQL 等语言，使同一源码在高亮库升级后产生不同结果。
+        const highlighted = hljs.highlight(source, {
+            language: supportedLanguage,
+            ignoreIllegals: true,
+        });
+        const resolvedLanguage = supportedLanguage;
+        pre.addClass('vdoc-code-block');
+        pre.attr('data-vdoc-code-language', resolvedLanguage);
+        codeElement
+            .removeClass()
+            .addClass(`hljs language-${resolvedLanguage}`)
+            .attr('data-vdoc-code-language', resolvedLanguage)
+            .html(highlighted.value);
+        styledContent = true;
+    });
+
+    if (styledContent) {
+        root.prepend(
+            `<style data-vdoc-markdown-style>\n${MARKDOWN_DOCUMENT_STYLE}\n</style>`
+        );
+    }
+    return root.html() || '';
+}
+
 function convertMarkdown(markdown) {
     const { protectedText, placeholders } = protectMarkdownMath(markdown);
     const html = marked.parse(protectedText, {
@@ -63,7 +178,9 @@ function convertMarkdown(markdown) {
         breaks: false,
         async: false,
     });
-    return restoreMarkdownMath(html, placeholders);
+    return normalizeMarkdownDocumentHtml(
+        restoreMarkdownMath(html, placeholders)
+    );
 }
 
 function convertPlainText(text) {
@@ -77,6 +194,66 @@ function convertPlainText(text) {
         })
         .filter(Boolean)
         .join('\n');
+}
+
+function normalizeDocxIndentForMarkdown(html) {
+    const $ = cheerio.load(
+        `<main data-vdoc-indent-root>${String(html || '')}</main>`,
+        null,
+        false
+    );
+    const root = $('main[data-vdoc-indent-root]');
+
+    root.find('p[style]').each((_index, paragraph) => {
+        const element = $(paragraph);
+        const declarations = String(element.attr('style') || '')
+            .split(';')
+            .map((declaration) => declaration.trim())
+            .filter(Boolean);
+        if (declarations.length !== 1) return;
+
+        const indent = declarations[0].match(
+            /^text-indent\s*:\s*([+]?(?:\d+(?:\.\d+)?|\.\d+))(em|pt)$/i
+        );
+        if (!indent || Number(indent[1]) <= 0) return;
+
+        // Markdown 行首四个 ASCII 空格表示代码块，不能用来模拟段落缩进。
+        // 两个全角空格既能表达中文正文约两字符首行缩进，又允许 Turndown
+        // 继续把段内 strong/em 等纯语义标签转换为 Markdown 标记。
+        element.removeAttr('style');
+        element.prepend('　　');
+    });
+
+    return root.html() || '';
+}
+
+function htmlToHybridMarkdown(html) {
+    const turndown = new TurndownService({
+        headingStyle: 'atx',
+        bulletListMarker: '-',
+        codeBlockStyle: 'fenced',
+        emDelimiter: '*',
+        strongDelimiter: '**',
+    });
+    // Markdown 无法无损表达的结构继续作为一等 HTML 源码域保留。
+    turndown.keep([
+        'table', 'thead', 'tbody', 'tfoot', 'tr', 'th', 'td',
+        'style', 'script', 'svg', 'canvas', 'video', 'audio',
+    ]);
+    turndown.addRule('preserve-styled-layout', {
+        filter(node) {
+            if (!node?.getAttribute) return false;
+            return Boolean(
+                node.getAttribute('style')
+                || node.getAttribute('class')
+                || node.getAttribute('data-vdoc-island')
+            );
+        },
+        replacement(_content, node) {
+            return `\n\n${node.outerHTML}\n\n`;
+        },
+    });
+    return turndown.turndown(normalizeDocxIndentForMarkdown(html));
 }
 
 function decodeRtfHex(source) {
@@ -549,12 +726,15 @@ async function importBuffer(filePath, buffer) {
 
     const kind = kindForExtension(extension);
     let html = '';
+    let source = '';
+    let sourceFormat = kind === 'pptx' ? 'html-scene' : 'markdown-hybrid';
+    let lineEnding = 'lf';
     let slides = [];
     let page = null;
     let warnings = [];
     if (kind === 'docx') {
         const converted = await convertDocx(buffer);
-        html = converted.html;
+        source = htmlToHybridMarkdown(converted.html);
         warnings = converted.warnings;
     } else if (kind === 'pptx') {
         const converted = await scriptoriumPptxImportService.convertPptx(buffer);
@@ -563,22 +743,38 @@ async function importBuffer(filePath, buffer) {
         warnings = converted.warnings;
     } else {
         const text = Buffer.from(buffer).toString('utf8').replace(/^\uFEFF/, '');
-        if (kind === 'markdown') html = convertMarkdown(text);
-        else if (kind === 'text') html = convertPlainText(text);
-        else if (kind === 'rtf') html = convertRtf(text);
-        else html = text;
+        lineEnding = text.includes('\r\n') ? 'crlf'
+            : text.includes('\r') ? 'cr' : 'lf';
+        if (kind === 'markdown') {
+            // 不编译、不格式化、不统一换行：解码后的 Markdown 原文直接入库。
+            source = text;
+        } else if (kind === 'text') {
+            source = String(text);
+        } else if (kind === 'rtf') {
+            source = htmlToHybridMarkdown(convertRtf(text));
+        } else {
+            // HTML 本身是 markdown-hybrid 中正式的一等源码域，无需旧格式包装。
+            source = text;
+        }
     }
 
     return {
         kind,
         html,
+        source,
+        sourceFormat,
+        lineEnding,
         slides,
         page,
         importMetadata: {
             sourceFormat: kind,
+            documentSourceFormat: sourceFormat,
             sourceName: path.basename(filePath),
             importedAt: new Date().toISOString(),
-            importer: `scriptorium-semantic-import-v${IMPORTER_VERSION}`,
+            importer: kind === 'markdown'
+                ? `scriptorium-original-source-import-v${IMPORTER_VERSION + 1}`
+                : `scriptorium-semantic-import-v${IMPORTER_VERSION}`,
+            lineEnding: kind === 'markdown' ? lineEnding : null,
             warnings,
         },
     };
@@ -590,8 +786,11 @@ module.exports = {
     escapeHtml,
     protectMarkdownMath,
     restoreMarkdownMath,
+    normalizeMarkdownDocumentHtml,
     convertMarkdown,
     convertPlainText,
+    normalizeDocxIndentForMarkdown,
+    htmlToHybridMarkdown,
     convertRtf,
     parseDocxStyles,
     parseDocxParagraphFormat,
