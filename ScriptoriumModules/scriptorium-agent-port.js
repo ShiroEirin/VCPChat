@@ -69,9 +69,12 @@
         const diff = context.prDiff;
         const containerModule = context.containerModule;
         const programmableContent = context.programmableContent;
-        if (!documentPort || !lineagePort || !core || !diff) {
+        const styleLibrary = context.styleLibrary;
+        const svgAssetLibrary = context.svgAssetLibrary;
+        if (!documentPort || !lineagePort || !core || !diff
+            || !styleLibrary || !svgAssetLibrary) {
             throw new TypeError(
-                'Agent controller requires DocumentPort, LineagePort, VDocCore and PR diff.'
+                'Agent controller requires DocumentPort, LineagePort, VDocCore, PR diff, VDocStyleLibrary and VDocSvgAssetLibrary.'
             );
         }
 
@@ -201,81 +204,87 @@
             });
         }
 
-        function markdownHeadingIndex(sourceValue) {
-            const source = String(sourceValue || '');
-            const lines = source.split(/\r\n?|\n/);
-            const offsets = [];
-            let offset = 0;
-            lines.forEach((line) => {
-                offsets.push(offset);
-                offset += line.length + 1;
-            });
+        function reviewProgrammableHtml(html, reviewContext = {}) {
+            if (!programmableContent?.normalizeHtmlDependencies
+                || !programmableContent?.reviewScriptsInHtml) {
+                return {
+                    html: String(html || ''),
+                    dependencies: [],
+                    diagnostics: [{
+                        level: 'refuse',
+                        ruleId: 'review-engine-unavailable',
+                        message: '可编程内容审查器未加载。',
+                        context: reviewContext,
+                    }],
+                    refused: true,
+                };
+            }
 
-            const headings = [];
-            let fence = null;
-            lines.forEach((line, lineIndex) => {
-                const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
-                if (fenceMatch) {
-                    if (!fence) fence = fenceMatch[1][0];
-                    else if (fence === fenceMatch[1][0]) fence = null;
-                    return;
-                }
-                if (fence) return;
-
-                const atx = line.match(/^ {0,3}(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$/);
-                const setext = lineIndex + 1 < lines.length
-                    ? lines[lineIndex + 1].match(/^ {0,3}(=+|-+)[ \t]*$/)
-                    : null;
-                const text = atx
-                    ? atx[2].trim()
-                    : setext && line.trim()
-                        ? line.trim()
-                        : '';
-                if (!text) return;
-                const level = atx ? atx[1].length : (setext[1][0] === '=' ? 1 : 2);
-                const start = offsets[lineIndex];
-                headings.push({
-                    id: `heading-${start}-${simpleHash(text)}`,
-                    index: headings.length,
-                    kind: 'heading',
-                    level,
-                    text,
-                    start,
-                    startLine: lineIndex + 1,
-                    headingEndLine: lineIndex + (atx ? 1 : 2),
-                });
+            const normalized = programmableContent.normalizeHtmlDependencies(
+                html,
+                reviewContext
+            );
+            const diagnostics = [...(normalized.diagnostics || [])];
+            programmableContent.reviewScriptsInHtml(
+                normalized.html,
+                reviewContext
+            ).forEach((entry) => {
+                if (entry.kind !== 'inline' || !entry.review) return;
+                (entry.review.findings || []).forEach((finding) =>
+                    diagnostics.push({
+                        ...finding,
+                        scriptId: entry.scriptId,
+                        context: entry.review.context,
+                    })
+                );
             });
-            headings.forEach((heading, index) => {
-                const next = headings.slice(index + 1)
-                    .find((candidate) => candidate.level <= heading.level);
-                heading.end = next ? next.start : source.length;
-                heading.endLine = next
-                    ? Math.max(heading.startLine, next.startLine - 1)
-                    : lines.length;
-            });
-            return headings;
+            return {
+                ...normalized,
+                diagnostics,
+                refused: diagnostics.some((item) => item.level === 'refuse'),
+            };
         }
 
-        function simpleHash(value) {
-            const source = String(value || '');
-            let hash = 0x811c9dc5;
-            for (let index = 0; index < source.length; index += 1) {
-                hash ^= source.charCodeAt(index);
-                hash = Math.imul(hash, 0x01000193);
-            }
-            return (hash >>> 0).toString(16).padStart(8, '0');
+        function programmableStatus(dependencies = [], diagnostics = []) {
+            return {
+                status: diagnostics.some((item) => item.level === 'refuse')
+                    ? 'refuse'
+                    : diagnostics.some((item) => item.level === 'warn')
+                        ? 'warn'
+                        : 'allow',
+                dependencies: [...new Set(dependencies)],
+                diagnostics,
+            };
+        }
+
+        function registerProgrammableDependencies(dependencies = []) {
+            const additions = [...new Set(dependencies)]
+                .filter((dependency) =>
+                    ['anime', 'three'].includes(dependency)
+                );
+            if (!additions.length) return false;
+            const model = documentPort.document();
+            const current = model?.manifest?.programmableDependencies || [];
+            const next = [...new Set([...current, ...additions])];
+            if (next.length === current.length) return false;
+            return documentPort.mutate((documentModel) => {
+                documentModel.manifest.programmableDependencies = next;
+            }, {
+                reason: 'programmable-dependencies-registered',
+                dirty: false,
+                derived: true,
+            });
         }
 
         function outline() {
             const current = adapter();
             if (current.kind === 'flow') {
-                const headings = markdownHeadingIndex(current.currentSource());
+                const headings = current.compile().headings || [];
                 return response({
                     sourceKind: 'markdown-hybrid',
-                    items: headings.map(({ start, end, ...heading }) => ({
-                        ...heading,
-                        sourceRange: { start, end },
-                    })),
+                    count: headings.length,
+                    totalCharacters: current.currentSource().length,
+                    items: headings,
                 });
             }
             return response({ items: current.outline() });
@@ -287,15 +296,17 @@
                 throw new Error('GetSection 仅适用于 VDOCX。');
             }
             const source = current.currentSource();
-            const headings = markdownHeadingIndex(source);
+            const headings = current.compile().headings || [];
             const requestedId = String(options.id || '');
             const requestedIndex = Number(options.index);
             const heading = requestedId
                 ? headings.find((item) => item.id === requestedId)
                 : headings[Number.isInteger(requestedIndex) ? requestedIndex : -1];
             if (!heading) throw new Error('指定章节不存在。请先调用 GetOutline 获取章节 ID 或索引。');
-            const sectionSource = source.slice(heading.start, heading.end)
-                .replace(/\s+$/, '');
+            const sectionSource = source.slice(
+                heading.sourceRange.start,
+                heading.sourceRange.end
+            ).replace(/\s+$/, '');
             const compiled = context.hybridCompiler?.compile?.(sectionSource, {
                 sanitizeHtml: core.sanitizeHtml,
             });
@@ -306,13 +317,12 @@
                     index: heading.index,
                     text: heading.text,
                     level: heading.level,
+                    characterCount: heading.characterCount,
+                    contentCharacterCount: heading.contentCharacterCount,
                 },
                 startLine: heading.startLine,
                 endLine: heading.endLine,
-                sourceRange: {
-                    start: heading.start,
-                    end: heading.end,
-                },
+                sourceRange: heading.sourceRange,
                 source: sectionSource,
                 renderedText: compiled
                     ? textFromHtml(compiled.html)
@@ -471,6 +481,243 @@
             });
         }
 
+        function listStylePacks(options = {}) {
+            const query = String(options.query || '').trim().toLowerCase();
+            const editableOnly = options.editableOnly === true;
+            const packs = styleLibrary.listPacks()
+                .filter((pack) => !editableOnly || pack.editable)
+                .filter((pack) => !query || [
+                    pack.manifest.id,
+                    pack.manifest.name,
+                    pack.manifest.description,
+                    pack.manifest.author,
+                    ...pack.styles.flatMap((style) => [
+                        style.id,
+                        style.name,
+                        style.description,
+                        style.category,
+                        ...(style.tags || []),
+                    ]),
+                ].some((value) =>
+                    String(value || '').toLowerCase().includes(query)
+                ));
+            return {
+                success: true,
+                format: styleLibrary.PACK_FORMAT,
+                version: styleLibrary.PACK_VERSION,
+                builtinPackId: styleLibrary.BUILTIN_PACK_ID,
+                count: packs.length,
+                packs,
+            };
+        }
+
+        function getStylePack(options = {}) {
+            const packId = String(
+                options.packId || options.id || ''
+            ).trim();
+            if (!packId) throw new Error('GetStylePack 缺少 packId。');
+            const pack = styleLibrary.getPack(packId);
+            if (!pack) throw new Error(`未找到高级样式包：${packId}`);
+            return {
+                success: true,
+                pack,
+                source: JSON.stringify({
+                    format: pack.format,
+                    version: pack.version,
+                    manifest: pack.manifest,
+                    styles: pack.styles,
+                }, null, 2),
+            };
+        }
+
+        async function upsertStylePack(options = {}) {
+            const author = normalizeAuthor(options.maid || options.author);
+            if (!author) {
+                throw new Error('Agent 管理样式包必须提供 maid 署名。');
+            }
+            const supplied = options.pack ?? options.source;
+            let pack = supplied;
+            if (typeof supplied === 'string') {
+                pack = styleLibrary.parsePack(supplied);
+            }
+            if (!pack || typeof pack !== 'object' || Array.isArray(pack)) {
+                throw new Error('UpsertStylePack 缺少 pack JSON 对象或源码。');
+            }
+            const packId = String(pack.manifest?.id || '').trim();
+            const existed = Boolean(styleLibrary.getPack(packId));
+            const result = styleLibrary.registerPack(pack, {
+                conflict: 'replace',
+            });
+            await context.onStyleLibraryChange?.({
+                operation: existed ? 'replace' : 'create',
+                pack: result,
+            });
+            return {
+                success: true,
+                operation: existed ? 'replace' : 'create',
+                maid: author,
+                pack: result,
+            };
+        }
+
+        async function deleteStylePack(options = {}) {
+            const author = normalizeAuthor(options.maid || options.author);
+            if (!author) {
+                throw new Error('Agent 管理样式包必须提供 maid 署名。');
+            }
+            const packId = String(
+                options.packId || options.id || ''
+            ).trim();
+            if (!packId) throw new Error('DeleteStylePack 缺少 packId。');
+            const existing = styleLibrary.getPack(packId);
+            if (!existing) throw new Error(`未找到高级样式包：${packId}`);
+            styleLibrary.unregisterPack(packId);
+            await context.onStyleLibraryChange?.({
+                operation: 'delete',
+                pack: existing,
+            });
+            return {
+                success: true,
+                operation: 'delete',
+                packId,
+                deletedStyleCount: existing.styles.length,
+                maid: author,
+            };
+        }
+
+        function listSvgAssetPacks(options = {}) {
+            const query = String(options.query || '').trim().toLowerCase();
+            const editableOnly = options.editableOnly === true;
+            const packs = svgAssetLibrary.listPacks()
+                .filter((pack) => !editableOnly || pack.editable)
+                .filter((pack) => !query || [
+                    pack.manifest.id,
+                    pack.manifest.name,
+                    pack.manifest.description,
+                    pack.manifest.author,
+                    ...pack.assets.flatMap((asset) => [
+                        asset.id,
+                        asset.name,
+                        asset.description,
+                        asset.category,
+                        ...(asset.tags || []),
+                    ]),
+                ].some((value) =>
+                    String(value || '').toLowerCase().includes(query)
+                ));
+            return {
+                success: true,
+                format: svgAssetLibrary.PACK_FORMAT,
+                version: svgAssetLibrary.PACK_VERSION,
+                builtinPackId: svgAssetLibrary.BUILTIN_PACK_ID,
+                count: packs.length,
+                packs,
+            };
+        }
+
+        function listSvgAssets(options = {}) {
+            const assets = svgAssetLibrary.list({
+                query: options.query,
+                packId: options.packId,
+                category: options.category,
+                kind: options.kind,
+            }).map((asset) => {
+                const { source, ...metadata } = asset;
+                return metadata;
+            });
+            return {
+                success: true,
+                count: assets.length,
+                assets,
+            };
+        }
+
+        function getSvgAsset(options = {}) {
+            const assetId = String(
+                options.assetId || options.id || ''
+            ).trim();
+            if (!assetId) throw new Error('GetSvgAsset 缺少 assetId。');
+            const asset = svgAssetLibrary.get(assetId);
+            if (!asset) throw new Error(`未找到 SVG 资产：${assetId}`);
+            const pack = svgAssetLibrary.getPack(asset.packId);
+            return {
+                success: true,
+                builtin: pack?.builtin === true,
+                editable: pack?.editable === true,
+                asset,
+                source: asset.source,
+            };
+        }
+
+        function getSvgAssetPack(options = {}) {
+            const packId = String(
+                options.packId || options.id || ''
+            ).trim();
+            if (!packId) {
+                throw new Error('GetSvgAssetPack 缺少 packId。');
+            }
+            const pack = svgAssetLibrary.getPack(packId);
+            if (!pack) throw new Error(`未找到 SVG 资产包：${packId}`);
+            return {
+                success: true,
+                pack,
+                source: svgAssetLibrary.serializePack(packId),
+            };
+        }
+
+        async function upsertSvgAssetPack(options = {}) {
+            const author = normalizeAuthor(options.maid || options.author);
+            if (!author) {
+                throw new Error('Agent 管理 SVG 资产包必须提供 maid 署名。');
+            }
+            const supplied = options.pack ?? options.source;
+            let pack = supplied;
+            if (typeof supplied === 'string') {
+                pack = svgAssetLibrary.parsePack(supplied);
+            }
+            if (!pack || typeof pack !== 'object' || Array.isArray(pack)) {
+                throw new Error(
+                    'UpsertSvgAssetPack 缺少 pack JSON 对象或源码。'
+                );
+            }
+            const packId = String(pack.manifest?.id || '').trim();
+            const existed = Boolean(svgAssetLibrary.getPack(packId));
+            const result = svgAssetLibrary.registerPack(pack, {
+                conflict: 'replace',
+            });
+            await context.persistSvgAssets?.();
+            return {
+                success: true,
+                operation: existed ? 'replace' : 'create',
+                maid: author,
+                pack: result,
+            };
+        }
+
+        async function deleteSvgAssetPack(options = {}) {
+            const author = normalizeAuthor(options.maid || options.author);
+            if (!author) {
+                throw new Error('Agent 管理 SVG 资产包必须提供 maid 署名。');
+            }
+            const packId = String(
+                options.packId || options.id || ''
+            ).trim();
+            if (!packId) {
+                throw new Error('DeleteSvgAssetPack 缺少 packId。');
+            }
+            const existing = svgAssetLibrary.getPack(packId);
+            if (!existing) throw new Error(`未找到 SVG 资产包：${packId}`);
+            svgAssetLibrary.unregisterPack(packId);
+            await context.persistSvgAssets?.();
+            return {
+                success: true,
+                operation: 'delete',
+                packId,
+                deletedAssetCount: existing.assets.length,
+                maid: author,
+            };
+        }
+
         function publicRecord(record) {
             const { snapshot, ...visible } = record;
             return visible;
@@ -496,7 +743,6 @@
         }
 
         function queueProposal(payload, proposal, operation) {
-            status();
             const author = normalizeAuthor(payload.author || payload.maid);
             const summary = String(payload.summary || '').trim();
             if (!author || !summary) {
@@ -513,6 +759,68 @@
             );
             if (handled.has(requestId)) return handled.get(requestId);
             const current = status();
+            const expectedRevision = Number(payload.expectedRevision);
+            if (Number.isFinite(expectedRevision)
+                && expectedRevision !== current.revision) {
+                const message =
+                    `提案基于 revision ${expectedRevision}，当前文档为 revision ${
+                        current.revision
+                    }；提案未应用，文档未发生变化。`;
+                const receipt = {
+                    decision: 'conflict',
+                    message,
+                    reviewer: {
+                        id: 'scriptorium-revision-guard',
+                        name: 'Scriptorium 修订保护',
+                        type: 'human',
+                    },
+                    createdAt: Date.now(),
+                    automatic: true,
+                    policy: {
+                        source: 'revision-preflight',
+                        expectedRevision,
+                        actualRevision: current.revision,
+                    },
+                };
+                const record = lineagePort.add({
+                    id: payload.prId || `pr-${crypto.randomUUID()}`,
+                    source: 'agent',
+                    author,
+                    name: payload.name || 'Agent 源码变更',
+                    summary,
+                    note: payload.note || '',
+                    baseRevision: expectedRevision,
+                    revision: current.revision,
+                    proposal,
+                    operation: null,
+                    changeSet: null,
+                    status: 'conflict',
+                    reviewedAt: Date.now(),
+                    receipt,
+                }, { snapshot: false });
+                const conflict = {
+                    success: false,
+                    code: 'DOCUMENT_REVISION_CONFLICT',
+                    message:
+                        '提案基础修订与当前文档修订不一致，请重新读取源码后提交。',
+                    expectedRevision,
+                    actualRevision: current.revision,
+                    requestId,
+                    pending: false,
+                    terminal: true,
+                    pr: publicRecord(record),
+                    receipt,
+                };
+                const task = Promise.resolve(
+                    context.persist?.('AI 提案预检冲突') || true
+                ).then(() => conflict);
+                handled.set(requestId, task);
+                window.dispatchEvent(new CustomEvent(
+                    'scriptorium:pr-completed',
+                    { detail: conflict }
+                ));
+                return task;
+            }
             const record = lineagePort.add({
                 id: payload.prId || `pr-${crypto.randomUUID()}`,
                 source: 'agent',
@@ -555,9 +863,83 @@
                     payload.slideIndex ?? current.activeSlideIndex()
                 )
                 : null;
-            const replacements = Array.isArray(payload.replacements)
+            const suppliedReplacements = Array.isArray(payload.replacements)
                 ? payload.replacements
                 : [payload];
+            let replacements = suppliedReplacements;
+            let programmable = programmableStatus();
+
+            if (current.kind === 'deck' && sourceKind === 'html') {
+                const dependencies = [];
+                const diagnostics = [];
+                replacements = suppliedReplacements.map((replacement, index) => {
+                    const hasAppend = Object.prototype.hasOwnProperty.call(
+                        replacement || {},
+                        'append'
+                    );
+                    const hasInsert = Object.prototype.hasOwnProperty.call(
+                        replacement || {},
+                        'insert'
+                    );
+                    const contentField = hasAppend
+                        ? 'append'
+                        : hasInsert
+                            ? 'insert'
+                            : 'replace';
+                    const content = contentField === 'replace'
+                        ? replacement?.replace ?? replacement?.replacement ?? ''
+                        : replacement?.[contentField] ?? '';
+                    const normalized = reviewProgrammableHtml(content, {
+                        phase: 'agent-pr-replacement',
+                        documentKind: 'pptx',
+                        slideIndex,
+                        replacementIndex: index,
+                        operation: contentField,
+                    });
+                    dependencies.push(...(normalized.dependencies || []));
+                    diagnostics.push(...(normalized.diagnostics || []));
+                    return {
+                        ...replacement,
+                        [contentField]: normalized.html,
+                    };
+                });
+                const candidate = diff.applyReplacements(
+                    sourceFor(sourceKind, slideIndex),
+                    replacements
+                );
+                if (!candidate.success) {
+                    return Promise.resolve(response(candidate));
+                }
+                const candidateReview = reviewProgrammableHtml(
+                    candidate.source,
+                    {
+                        phase: 'agent-pr-candidate',
+                        documentKind: 'pptx',
+                        slideIndex,
+                    }
+                );
+                dependencies.push(...(candidateReview.dependencies || []));
+                diagnostics.push(...(candidateReview.diagnostics || []));
+                programmable = programmableStatus(dependencies, diagnostics);
+            }
+
+            const proposal = {
+                type: 'source-replace',
+                sourceKind,
+                slideIndex,
+                replacements,
+                programmableContent: programmable,
+            };
+            const expectedRevision = Number(payload.expectedRevision);
+            if (Number.isFinite(expectedRevision)
+                && expectedRevision !== status().revision) {
+                // Revision 是乐观并发的首要裁决条件。旧修订请求不得继续
+                // 定位 target，否则会以 TARGET_NOT_FOUND 掩盖真实冲突。
+                return queueProposal(payload, proposal, () => ({
+                    success: false,
+                    code: 'DOCUMENT_REVISION_CONFLICT',
+                }));
+            }
             const preliminary = diff.applyReplacements(
                 sourceFor(sourceKind, slideIndex),
                 replacements
@@ -579,31 +961,42 @@
                     }));
                 }
             }
-            return queueProposal(payload, {
-                type: 'source-replace',
-                sourceKind,
-                slideIndex,
-                replacements,
-            }, () => {
+            return queueProposal(payload, proposal, () => {
                 const active = adapter();
                 const result = diff.applyReplacements(
                     sourceFor(sourceKind, slideIndex),
                     replacements
                 );
                 if (!result.success) return result;
+                let nextSource = result.source;
+                if (active.kind === 'deck' && sourceKind === 'html') {
+                    const normalized = reviewProgrammableHtml(nextSource, {
+                        phase: 'agent-pr-apply',
+                        documentKind: 'pptx',
+                        slideIndex,
+                    });
+                    nextSource = normalized.html;
+                    programmable = programmableStatus(
+                        normalized.dependencies,
+                        normalized.diagnostics
+                    );
+                    registerProgrammableDependencies(
+                        normalized.dependencies
+                    );
+                }
                 const changed = sourceKind === 'deck-css'
                     || sourceKind === 'document-css'
-                    ? active.replaceCurrentCss(result.source, {
+                    ? active.replaceCurrentCss(nextSource, {
                         reason: 'agent-source-pr',
                     })
                     : (
                         active.kind === 'deck'
                             ? active.replaceSlideSource(
                                 slideIndex,
-                                result.source,
+                                nextSource,
                                 { reason: 'agent-source-pr' }
                             )
-                            : active.replaceCurrentSource(result.source, {
+                            : active.replaceCurrentSource(nextSource, {
                                 reason: 'agent-source-pr',
                             })
                     );
@@ -614,7 +1007,9 @@
                         sourceKind,
                         slideIndex,
                         replacements: result.applied,
+                        programmableContent: programmable,
                     },
+                    programmableContent: programmable,
                 };
             });
         }
@@ -628,17 +1023,52 @@
                     message: '幻灯片操作仅适用于 VPPTX。',
                 });
             }
+            let normalizedPayload = payload;
+            let programmable = programmableStatus();
+            if (type !== 'delete') {
+                if (!String(payload.source || '').trim()) {
+                    return Promise.resolve(response({
+                        success: false,
+                        code: 'SLIDE_SOURCE_REQUIRED',
+                        message: '新增或插入页面必须提供完整 source。',
+                    }));
+                }
+                const insertionIndex = type === 'insert'
+                    ? Math.max(
+                        0,
+                        Math.min(
+                            current.slides().length,
+                            Number(payload.slideIndex) || 0
+                        )
+                    )
+                    : current.slides().length;
+                const normalized = reviewProgrammableHtml(payload.source, {
+                    phase: 'agent-slide',
+                    documentKind: 'pptx',
+                    slideIndex: insertionIndex,
+                });
+                normalizedPayload = {
+                    ...payload,
+                    source: normalized.html,
+                };
+                programmable = programmableStatus(
+                    normalized.dependencies,
+                    normalized.diagnostics
+                );
+            }
             const proposal = {
                 type: `slide-${type}`,
-                slideIndex: payload.slideIndex,
-                name: payload.name,
-                source: payload.source,
-                notes: payload.notes,
+                slideIndex: normalizedPayload.slideIndex,
+                name: normalizedPayload.name,
+                source: normalizedPayload.source,
+                notes: normalizedPayload.notes,
+                programmableContent: programmable,
             };
-            return queueProposal(payload, proposal, () => {
+            return queueProposal(normalizedPayload, proposal, () => {
                 if (type === 'delete') {
                     const removed = current.deleteSlide(
-                        payload.slideIndex ?? current.activeSlideIndex(),
+                        normalizedPayload.slideIndex
+                            ?? current.activeSlideIndex(),
                         { reason: 'agent-slide-delete' }
                     );
                     return {
@@ -650,23 +1080,30 @@
                     };
                 }
                 const created = current.addSlide({
-                    name: payload.name,
-                    source: payload.source,
-                    notes: payload.notes,
-                    transition: payload.transition,
-                    resources: payload.resources,
+                    name: normalizedPayload.name,
+                    source: normalizedPayload.source,
+                    notes: normalizedPayload.notes,
+                    transition: normalizedPayload.transition,
+                    resources: normalizedPayload.resources,
                 }, {
                     index: type === 'insert'
-                        ? payload.slideIndex
+                        ? normalizedPayload.slideIndex
                         : undefined,
                     reason: `agent-slide-${type}`,
                 });
+                if (created) {
+                    registerProgrammableDependencies(
+                        programmable.dependencies
+                    );
+                }
                 return {
                     success: Boolean(created),
                     operation: {
                         type: `slide-${type}`,
                         slideId: created?.id,
+                        programmableContent: programmable,
                     },
+                    programmableContent: programmable,
                 };
             });
         }
@@ -774,13 +1211,33 @@
                 throw new Error('VPPTX slides 必须包含至少一页完整 source。');
             }
 
-            const sources = deck
-                ? slides.map((slide) => String(slide.source || ''))
-                : [source];
-            const review = programmableReview(
-                sources,
-                deck ? 'pptx' : 'docx'
-            );
+            const normalizedSlides = deck
+                ? slides.map((slide, index) => {
+                    const normalized = reviewProgrammableHtml(
+                        slide?.source,
+                        {
+                            phase: 'agent-project-create',
+                            documentKind: 'pptx',
+                            slideIndex: index,
+                        }
+                    );
+                    return {
+                        ...(slide && typeof slide === 'object' ? slide : {}),
+                        source: normalized.html,
+                        programmableContent: normalized,
+                    };
+                })
+                : [];
+            const review = deck
+                ? programmableStatus(
+                    normalizedSlides.flatMap((slide) =>
+                        slide.programmableContent.dependencies || []
+                    ),
+                    normalizedSlides.flatMap((slide) =>
+                        slide.programmableContent.diagnostics || []
+                    )
+                )
+                : programmableReview([source], 'docx');
             if (review.status === 'refuse') {
                 return {
                     success: false,
@@ -816,10 +1273,52 @@
                 source: deck ? undefined : source,
                 documentCss: deck ? undefined : payload.documentCss,
                 deckCss: deck ? payload.deckCss : undefined,
-                slides: deck ? slides : undefined,
+                slides: deck
+                    ? normalizedSlides.map(
+                        ({ programmableContent: _review, ...slide }) => slide
+                    )
+                    : undefined,
                 page: payload.page,
                 presentation: payload.presentation,
             });
+            const creator = normalizeAuthor(payload.maid || payload.author);
+            if (!creator) {
+                return {
+                    success: false,
+                    code: 'AUTHOR_REQUIRED',
+                    message: 'Agent 创建工程必须提供有效 maid 署名。',
+                };
+            }
+            const createdAt = Date.parse(model.manifest.createdAt) || Date.now();
+            model.checkpoints = [{
+                id: `lineage-create-${model.manifest.id}`,
+                source: 'agent',
+                author: creator,
+                name: 'Agent 创建文档',
+                summary: String(
+                    payload.summary || `由 ${creator.name} 创建完整文档工程。`
+                ).trim(),
+                note: '',
+                createdAt,
+                baseRevision: null,
+                revision: 0,
+                operation: {
+                    type: 'project-create',
+                    documentKind: deck ? 'pptx' : 'docx',
+                },
+                proposal: null,
+                changeSet: null,
+                status: 'applied',
+                receipt: {
+                    decision: 'created',
+                    message: `文档由 ${creator.name} 创建。`,
+                    reviewer: creator,
+                    createdAt,
+                    automatic: true,
+                    policy: { source: 'agent-project-creation' },
+                },
+                snapshot: '',
+            }];
             model.manifest.programmableDependencies = review.dependencies
                 .filter((dependency) => ['anime', 'three'].includes(dependency));
             const bytes = await containerModule.pack(model, new Map());
@@ -858,40 +1357,69 @@
             const task = mutationQueue.then(async () => {
                 const activeStatus = status();
                 if (entry.documentId !== activeStatus.documentId) {
+                    const conflictReceipt = {
+                        ...receipt,
+                        decision: 'conflict',
+                        message: '当前窗口已切换到另一份文档，提案未应用。',
+                    };
                     lineagePort.update(entry.record.id, {
                         status: 'conflict',
                         reviewedAt: Date.now(),
-                        receipt: {
-                            ...receipt,
-                            decision: 'conflict',
-                        },
+                        operation: null,
+                        changeSet: null,
+                        receipt: conflictReceipt,
                     });
+                    await context.persist?.('AI 提案文档上下文冲突');
                     const conflict = {
                         success: false,
                         code: 'DOCUMENT_CONTEXT_CHANGED',
-                        message: '当前窗口已切换到另一份文档。',
+                        message: conflictReceipt.message,
+                        pending: false,
+                        terminal: true,
+                        pr: publicRecord(entry.record),
+                        receipt: conflictReceipt,
                     };
                     entry.resolve(conflict);
+                    window.dispatchEvent(new CustomEvent(
+                        'scriptorium:pr-completed',
+                        { detail: conflict }
+                    ));
                     return conflict;
                 }
                 if (Number(entry.record.baseRevision) !== activeStatus.revision) {
+                    const conflictReceipt = {
+                        ...receipt,
+                        decision: 'conflict',
+                        message: `文档修订已从 ${
+                            entry.record.baseRevision
+                        } 变为 ${activeStatus.revision}，提案未应用。`,
+                    };
                     lineagePort.update(entry.record.id, {
                         status: 'conflict',
                         reviewedAt: Date.now(),
-                        receipt: {
-                            ...receipt,
-                            decision: 'conflict',
-                            message: `文档修订已从 ${entry.record.baseRevision} 变为 ${activeStatus.revision}，提案未应用。`,
-                        },
+                        revision: activeStatus.revision,
+                        operation: null,
+                        changeSet: null,
+                        receipt: conflictReceipt,
                     });
+                    await context.persist?.('AI 提案应用冲突');
                     const conflict = {
                         success: false,
                         code: 'DOCUMENT_REVISION_CONFLICT',
-                        message: '提案基础修订与当前文档修订不一致，请重新读取源码后提交。',
+                        message:
+                            '提案基础修订与当前文档修订不一致，请重新读取源码后提交。',
                         expectedRevision: entry.record.baseRevision,
                         actualRevision: activeStatus.revision,
+                        pending: false,
+                        terminal: true,
+                        pr: publicRecord(entry.record),
+                        receipt: conflictReceipt,
                     };
                     entry.resolve(conflict);
+                    window.dispatchEvent(new CustomEvent(
+                        'scriptorium:pr-completed',
+                        { detail: conflict }
+                    ));
                     return conflict;
                 }
                 const before = adapter().sourceState();
@@ -986,6 +1514,16 @@
             getViewportSource: viewportSource,
             getVisualContext: visualContext,
             getPrHistory: history,
+            listStylePacks,
+            getStylePack,
+            upsertStylePack,
+            deleteStylePack,
+            listSvgAssetPacks,
+            listSvgAssets,
+            getSvgAsset,
+            getSvgAssetPack,
+            upsertSvgAssetPack,
+            deleteSvgAssetPack,
             submitSourcePr,
             buildProjectArtifact,
         });
@@ -1029,7 +1567,7 @@
         }
 
         return Object.freeze({
-            version: 3,
+            version: 5,
             common,
             docx,
             pptx,

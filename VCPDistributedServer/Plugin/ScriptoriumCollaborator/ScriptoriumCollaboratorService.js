@@ -185,7 +185,7 @@ const MARKDOWN_FIELD_LABELS = Object.freeze({
     title: '标题',
     name: '名称',
     dirty: '存在未保存修改',
-    activeSlideIndex: '当前幻灯片索引',
+    activeSlideIndex: '当前幻灯片页码',
     slideCount: '幻灯片总数',
     scene: '场景配置',
     programmableContent: '可编程内容',
@@ -196,11 +196,20 @@ const MARKDOWN_FIELD_LABELS = Object.freeze({
     renderedText: '渲染文本',
     pages: '页面',
     items: '目录项',
+    count: '数量',
+    totalCharacters: '文档总字符数',
+    index: '目录索引',
+    level: '标题级别',
+    characterCount: '章节字符数',
+    contentCharacterCount: '章节正文字数',
+    sourceRange: '章节源码范围',
+    headingRange: '标题源码范围',
     records: '历史记录',
     results: '检索结果',
     query: '检索词',
     sourceKind: '源码类型',
-    slideIndex: '幻灯片索引',
+    slideIndex: '幻灯片页码',
+    line: '插入行号',
     startLine: '起始行',
     endLine: '结束行',
     totalLines: '总行数',
@@ -210,6 +219,8 @@ const MARKDOWN_FIELD_LABELS = Object.freeze({
     deckCss: '演示共享 CSS',
     context: '上下文源码',
     target: '目标源码',
+    insert: '插入源码',
+    append: '末尾追加源码',
     replace: '替换源码',
     replacement: '替换源码',
     heading: '章节标题',
@@ -218,6 +229,27 @@ const MARKDOWN_FIELD_LABELS = Object.freeze({
     notes: '备注',
     note: '备注',
     summary: '摘要',
+    packs: '样式主题包',
+    pack: '样式主题包',
+    packId: '样式主题包 ID',
+    styleCount: '样式数量',
+    deletedStyleCount: '已删除样式数量',
+    assets: 'SVG 资产',
+    asset: 'SVG 资产',
+    assetId: 'SVG 资产 ID',
+    assetCount: 'SVG 资产数量',
+    animatedCount: '动画资产数量',
+    deletedAssetCount: '已删除 SVG 资产数量',
+    kind: '类型',
+    category: '分类',
+    tags: '标签',
+    description: '描述',
+    defaultSize: '默认尺寸',
+    builtin: '内置只读',
+    editable: '允许编辑',
+    builtinPackId: '内置包 ID',
+    format: '格式',
+    version: '版本',
     maid: 'Maid 署名',
     author: '作者',
     reviewer: '审阅者',
@@ -246,6 +278,8 @@ const MARKDOWN_CODE_FIELDS = new Set([
     'deckCss',
     'context',
     'target',
+    'insert',
+    'append',
     'replace',
     'replacement',
 ]);
@@ -285,7 +319,15 @@ function codeLanguage(key, parent = {}) {
     const sourceKind = String(parent.sourceKind || '').toLowerCase();
     if (['deck-css', 'document-css'].includes(sourceKind)) return 'css';
     if (sourceKind === 'markdown-hybrid') return 'markdown';
-    if (['source', 'context', 'target', 'replace', 'replacement'].includes(key)) {
+    if ([
+        'source',
+        'context',
+        'target',
+        'insert',
+        'append',
+        'replace',
+        'replacement',
+    ].includes(key)) {
         return sourceKind === 'html' || /<\/?[a-z][\s\S]*>/i.test(String(parent[key] || ''))
             ? 'html'
             : 'text';
@@ -376,6 +418,104 @@ function resultText(title, result) {
     };
 }
 
+function outlineResultText(result = {}) {
+    const items = Array.isArray(result.items) ? result.items : [];
+    const docx = result.sourceKind === 'markdown-hybrid';
+    if (!docx) return resultText('Scriptorium · getOutline', result);
+
+    const lines = [
+        '# Scriptorium · 分层章节目录',
+        '',
+        `- **章节数**：${Number(result.count ?? items.length)}`,
+        `- **文档总字符数**：${Number(result.totalCharacters || 0)}`,
+        `- **修订号**：${Number(result.revision || 0)}`,
+        '',
+        '> 建议先按标题层级和章节字符数选择少量关键章节，再用 GetSection 按 ID 读取；需要人物、地点或情节细节时使用 SearchSource 全文检索。',
+        '',
+        '## 章节',
+        '',
+    ];
+    if (!items.length) {
+        lines.push('（未识别到章节标题）');
+    } else {
+        items.forEach((item) => {
+            const level = Math.max(1, Number(item.level) || 1);
+            const startLine = Number(item.startLine) || 1;
+            const endLine = Number(item.endLine) || startLine;
+            const characters = Number(item.characterCount) || 0;
+            lines.push(
+                `${'  '.repeat(level - 1)}- [${Number(item.index)}] ${
+                    escapeMarkdownInline(item.text || '未命名章节')
+                } · L${startLine}-${endLine} · ${characters} 字 · ID: \`${
+                    String(item.id || '').replace(/`/g, '')
+                }\``
+            );
+        });
+    }
+    return {
+        content: [{
+            type: 'text',
+            text: lines.join('\n'),
+        }],
+        details: result,
+    };
+}
+
+function internalSlideIndex(value, fieldName = 'slideIndex') {
+    if (value === undefined || value === null || value === '') return undefined;
+    const pageNumber = Number(value);
+    if (!Number.isInteger(pageNumber) || pageNumber < 1) {
+        throw new Error(
+            `[ScriptoriumCollaborator] ${fieldName} 必须是从 1 开始的整数页码。`
+        );
+    }
+    return pageNumber - 1;
+}
+
+function internalizePagePayload(payload = {}, endpoint = 'common') {
+    if (endpoint === 'docx'
+        || !Object.prototype.hasOwnProperty.call(payload, 'slideIndex')) {
+        return payload;
+    }
+    return {
+        ...payload,
+        slideIndex: internalSlideIndex(payload.slideIndex),
+    };
+}
+
+function externalizePageNumbers(value, context = {}) {
+    if (Array.isArray(value)) {
+        return value.map((item) => externalizePageNumbers(item, context));
+    }
+    if (!value || typeof value !== 'object') return value;
+
+    const deck = context.deck || value.documentKind === 'pptx';
+    const result = {};
+    for (const [key, fieldValue] of Object.entries(value)) {
+        const numberedIndex = deck
+            && Number.isInteger(fieldValue)
+            && (
+                key === 'slideIndex'
+                || key === 'activeSlideIndex'
+                || (
+                    key === 'index'
+                    && (
+                        context.collection === 'pages'
+                        || context.collection === 'items'
+                        || Object.prototype.hasOwnProperty.call(value, 'slideId')
+                    )
+                )
+            );
+        result[key] = numberedIndex
+            ? fieldValue + 1
+            : externalizePageNumbers(fieldValue, {
+                deck,
+                collection: Array.isArray(fieldValue) ? key : context.collection,
+            });
+    }
+    return result;
+}
+
 async function call(
     args,
     method,
@@ -387,9 +527,14 @@ async function call(
         requestId: requestIdOf(args, executionContext),
         endpoint,
         method,
-        payload,
+        payload: internalizePagePayload(payload, endpoint),
     });
-    return resultText(`Scriptorium · ${method}`, result);
+    return resultText(
+        `Scriptorium · ${method}`,
+        externalizePageNumbers(result, {
+            deck: endpoint === 'pptx' || result?.documentKind === 'pptx',
+        })
+    );
 }
 
 async function listFonts(args = {}) {
@@ -427,8 +572,18 @@ async function getRenderedText(args) {
     });
 }
 
-async function getOutline(args) {
-    return call(args, 'getOutline');
+async function getOutline(args, executionContext = {}) {
+    const endpoint = endpointFor(args);
+    const result = await requireControl().call({
+        requestId: requestIdOf(args, executionContext),
+        endpoint,
+        method: 'getOutline',
+        payload: {},
+    });
+    const externalized = externalizePageNumbers(result, {
+        deck: endpoint === 'pptx' || result?.documentKind === 'pptx',
+    });
+    return outlineResultText(externalized);
 }
 
 async function getSection(args) {
@@ -476,11 +631,14 @@ async function getViewportSource(args) {
 }
 
 async function getVisualContext(args, executionContext = {}) {
-    return requireControl().captureVisualContext({
+    const endpoint = endpointFor(args);
+    const result = await requireControl().captureVisualContext({
         requestId: requestIdOf(args, executionContext),
-        endpoint: endpointFor(args),
+        endpoint,
         scope: args.scope || 'viewport',
-        slideIndex: args.slideIndex,
+        slideIndex: endpoint === 'docx'
+            ? args.slideIndex
+            : internalSlideIndex(args.slideIndex),
         format: args.format || args.imageFormat,
         quality: args.quality,
         stabilizationMs: args.stabilizationMs
@@ -488,6 +646,10 @@ async function getVisualContext(args, executionContext = {}) {
             ?? args.visualDelayMs
             ?? args.captureDelayMs
             ?? args.screenshotDelayMs,
+    });
+    return externalizePageNumbers(result, {
+        deck: endpoint === 'pptx'
+            || result?.details?.documentKind === 'pptx',
     });
 }
 
@@ -498,13 +660,147 @@ async function getPrHistory(args) {
     });
 }
 
+async function listStylePacks(args) {
+    return call(args, 'listStylePacks', {
+        query: args.query,
+        editableOnly: booleanOf(args.editableOnly, false),
+    }, 'common');
+}
+
+async function getStylePack(args) {
+    const packId = String(args.packId || args.id || '').trim();
+    if (!packId) {
+        throw new Error('[ScriptoriumCollaborator] GetStylePack 缺少 packId。');
+    }
+    return call(args, 'getStylePack', { packId }, 'common');
+}
+
+async function upsertStylePack(args, executionContext = {}) {
+    const supplied = args.pack ?? args.source;
+    if (supplied === undefined || supplied === null || supplied === '') {
+        throw new Error(
+            '[ScriptoriumCollaborator] UpsertStylePack 缺少 pack 或 source。'
+        );
+    }
+    const pack = typeof supplied === 'object'
+        ? parseObject(supplied, 'pack')
+        : parseObject(String(supplied), 'source');
+    const maid = authorFromMaid(args, executionContext);
+    return call(args, 'upsertStylePack', {
+        requestId: requestIdOf(args, executionContext),
+        pack,
+        maid,
+        author: maid,
+    }, 'common', executionContext);
+}
+
+async function deleteStylePack(args, executionContext = {}) {
+    const packId = String(args.packId || args.id || '').trim();
+    if (!packId) {
+        throw new Error(
+            '[ScriptoriumCollaborator] DeleteStylePack 缺少 packId。'
+        );
+    }
+    const maid = authorFromMaid(args, executionContext);
+    return call(args, 'deleteStylePack', {
+        requestId: requestIdOf(args, executionContext),
+        packId,
+        maid,
+        author: maid,
+    }, 'common', executionContext);
+}
+
+async function listSvgAssetPacks(args) {
+    return call(args, 'listSvgAssetPacks', {
+        query: args.query,
+        editableOnly: booleanOf(args.editableOnly, false),
+    }, 'common');
+}
+
+async function listSvgAssets(args) {
+    return call(args, 'listSvgAssets', {
+        query: args.query,
+        packId: args.packId,
+        category: args.category,
+        kind: args.kind,
+    }, 'common');
+}
+
+async function getSvgAsset(args) {
+    const assetId = String(args.assetId || args.id || '').trim();
+    if (!assetId) {
+        throw new Error(
+            '[ScriptoriumCollaborator] GetSvgAsset 缺少 assetId。'
+        );
+    }
+    return call(args, 'getSvgAsset', { assetId }, 'common');
+}
+
+async function getSvgAssetPack(args) {
+    const packId = String(args.packId || args.id || '').trim();
+    if (!packId) {
+        throw new Error(
+            '[ScriptoriumCollaborator] GetSvgAssetPack 缺少 packId。'
+        );
+    }
+    return call(args, 'getSvgAssetPack', { packId }, 'common');
+}
+
+async function upsertSvgAssetPack(args, executionContext = {}) {
+    const supplied = args.pack ?? args.source;
+    if (supplied === undefined || supplied === null || supplied === '') {
+        throw new Error(
+            '[ScriptoriumCollaborator] UpsertSvgAssetPack 缺少 pack 或 source。'
+        );
+    }
+    const pack = typeof supplied === 'object'
+        ? parseObject(supplied, 'pack')
+        : parseObject(String(supplied), 'source');
+    const maid = authorFromMaid(args, executionContext);
+    return call(args, 'upsertSvgAssetPack', {
+        requestId: requestIdOf(args, executionContext),
+        pack,
+        maid,
+        author: maid,
+    }, 'common', executionContext);
+}
+
+async function deleteSvgAssetPack(args, executionContext = {}) {
+    const packId = String(args.packId || args.id || '').trim();
+    if (!packId) {
+        throw new Error(
+            '[ScriptoriumCollaborator] DeleteSvgAssetPack 缺少 packId。'
+        );
+    }
+    const maid = authorFromMaid(args, executionContext);
+    return call(args, 'deleteSvgAssetPack', {
+        requestId: requestIdOf(args, executionContext),
+        packId,
+        maid,
+        author: maid,
+    }, 'common', executionContext);
+}
+
 async function submitSourcePr(args, executionContext = {}) {
+    const hasAppend = Object.prototype.hasOwnProperty.call(args, 'append');
+    const hasInsert = Object.prototype.hasOwnProperty.call(args, 'insert');
     const replacements = args.replacements === undefined
-        ? [{
-            target: args.target,
-            replace: args.replace ?? args.replacement ?? '',
-            startLine: args.startLine,
-        }]
+        ? [
+            hasAppend
+                ? {
+                    append: args.append,
+                }
+                : hasInsert
+                    ? {
+                        insert: args.insert,
+                        line: args.line,
+                    }
+                    : {
+                        target: args.target,
+                        replace: args.replace ?? args.replacement ?? '',
+                        startLine: args.startLine,
+                    },
+        ]
         : parseArray(args.replacements, 'replacements');
     const maid = authorFromMaid(args, executionContext);
     return call(args, 'submitSourcePr', {
@@ -641,7 +937,7 @@ async function processSingleToolCall(args, executionContext = {}) {
         case 'getfulltext':
             return getRenderedText(args);
         case 'getoutline':
-            return getOutline(args);
+            return getOutline(args, executionContext);
         case 'getsection':
             return getSection(args);
         case 'getsource':
@@ -656,6 +952,30 @@ async function processSingleToolCall(args, executionContext = {}) {
             return getVisualContext(args, executionContext);
         case 'getprhistory':
             return getPrHistory(args);
+        case 'liststylepacks':
+        case 'liststyles':
+            return listStylePacks(args);
+        case 'getstylepack':
+        case 'getstylesource':
+            return getStylePack(args);
+        case 'upsertstylepack':
+        case 'savestylepack':
+            return upsertStylePack(args, executionContext);
+        case 'deletestylepack':
+            return deleteStylePack(args, executionContext);
+        case 'listsvgassetpacks':
+            return listSvgAssetPacks(args);
+        case 'listsvgassets':
+            return listSvgAssets(args);
+        case 'getsvgasset':
+            return getSvgAsset(args);
+        case 'getsvgassetpack':
+            return getSvgAssetPack(args);
+        case 'upsertsvgassetpack':
+        case 'savesvgassetpack':
+            return upsertSvgAssetPack(args, executionContext);
+        case 'deletesvgassetpack':
+            return deleteSvgAssetPack(args, executionContext);
         case 'submitsourcepr':
             return submitSourcePr(args, executionContext);
         case 'addslide':
@@ -678,7 +998,7 @@ async function processSingleToolCall(args, executionContext = {}) {
             );
         default:
             throw new Error(
-                '[ScriptoriumCollaborator] 不支持的 command。可用值：ListFonts、GetDocumentInfo、GetRenderedText、GetOutline、GetSection、GetSource、SearchSource、GetViewportSource、GetVisualContext、GetPrHistory、SubmitSourcePr、AddSlide、InsertSlide、DeleteSlide、UpdatePresentationConfig、CreateProject、GetStorageInfo。'
+                '[ScriptoriumCollaborator] 不支持的 command。可用值：ListFonts、GetDocumentInfo、GetRenderedText、GetOutline、GetSection、GetSource、SearchSource、GetViewportSource、GetVisualContext、GetPrHistory、ListStylePacks、GetStylePack、UpsertStylePack、DeleteStylePack、ListSvgAssetPacks、ListSvgAssets、GetSvgAsset、GetSvgAssetPack、UpsertSvgAssetPack、DeleteSvgAssetPack、SubmitSourcePr、AddSlide、InsertSlide、DeleteSlide、UpdatePresentationConfig、CreateProject、GetStorageInfo。'
             );
     }
 }
@@ -811,9 +1131,13 @@ module.exports = {
     processToolCall,
     _test: {
         commandOf,
+        internalSlideIndex,
+        internalizePagePayload,
+        externalizePageNumbers,
         markdownFence,
         markdownObject,
         resultText,
+        outlineResultText,
         getSerialCommandEntries,
         extractSerialStepArgs,
         parseWaitMs,

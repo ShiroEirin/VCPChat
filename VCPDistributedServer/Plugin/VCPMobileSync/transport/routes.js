@@ -3,12 +3,7 @@
  */
 
 const express = require("express");
-const { getDb } = require("../core/db");
 const { checkIdempotency, recordOperation } = require("../core/idempotency");
-const {
-  handleSyncManifest,
-  handleMessageManifest,
-} = require("../sync/manifest");
 const {
   downloadEntity,
   downloadEntities,
@@ -23,9 +18,53 @@ const {
   downloadMessagesStreamRaw,
   uploadMessagesBatchRaw,
   downloadAttachment,
-  uploadAttachment,
+  uploadAttachmentStream,
 } = require("../sync/message");
 const { getLogger } = require("../core/logger");
+const {
+  createHttpErrorBody,
+  createStreamErrorFrame,
+  normalizeFailureResult,
+} = require("../error-contract");
+
+function entityStage(type) {
+  return ["topic", "agent_topic", "group_topic"].includes(type)
+    ? "topic_metadata"
+    : "owner_metadata";
+}
+
+function failedTopicIds(type, id) {
+  return ["topic", "agent_topic", "group_topic"].includes(type) &&
+    typeof id === "string" && id.length > 0
+    ? [id]
+    : [];
+}
+
+function sendHttpError(res, status, error, fallback) {
+  return res.status(status).json(createHttpErrorBody(error, fallback));
+}
+
+function streamErrorFallback(centralSync, code = "SYNC_STREAM_FAILED") {
+  return {
+    code,
+    origin: centralSync ? "desktop_cds" : "desktop_plugin",
+    stage: "messages",
+  };
+}
+
+function requestStage(req) {
+  const route = req.path || "";
+  if (route.includes("message") || route.includes("attachment")) return "messages";
+  if (route === "/changes") return "history";
+  if (route === "/upload-entities-batch") return "topic_metadata";
+  if (route === "/download-avatar" || route === "/upload-avatar") {
+    return "owner_metadata";
+  }
+  if (route.includes("entity") || route.includes("entities")) {
+    return entityStage(req.body?.type || req.query?.type);
+  }
+  return "startup";
+}
 
 /**
  * 注册 HTTP 路由
@@ -53,7 +92,10 @@ function registerRoutes(app, { syncToken, appDataPath, centralSync = null }) {
     }
 
     if (providedToken !== syncToken) {
-      return res.status(401).json({ error: "Unauthorized" });
+      return sendHttpError(res, 401, "Unauthorized", {
+        code: "SYNC_AUTH_FAILED",
+        stage: "connect",
+      });
     }
 
     next();
@@ -68,7 +110,8 @@ function registerRoutes(app, { syncToken, appDataPath, centralSync = null }) {
       const duration = Date.now() - start;
       const status = res.statusCode;
       const level = status >= 500 ? "error" : status >= 400 ? "warn" : "info";
-      logger.logOperation("http", `${req.method}`, routePath, level === "error" ? "error" : "success", `status=${status} duration=${duration}ms`);
+      const result = level === "error" ? "error" : level === "warn" ? "warn" : "success";
+      logger.logOperation("http", `${req.method}`, routePath, result, `status=${status} duration=${duration}ms`);
     });
 
     next();
@@ -81,23 +124,48 @@ function registerRoutes(app, { syncToken, appDataPath, centralSync = null }) {
     try {
       const dto = await downloadEntity({ id, type });
       if (!dto) {
-        return res.status(404).json({ error: "Not found" });
+        return sendHttpError(res, 404, "Entity not found", {
+          code: "SYNC_ENTITY_NOT_FOUND",
+          stage: entityStage(type),
+          failedTopicIds: failedTopicIds(type, id),
+        });
       }
       res.json(dto);
     } catch (e) {
-      res.status(500).json({ error: e.message });
+      sendHttpError(res, 500, e, {
+        code: "SYNC_ENTITY_READ_FAILED",
+        stage: entityStage(type),
+        failedTopicIds: failedTopicIds(type, id),
+      });
     }
   });
 
   // 1.1 批量下载实体
   router.post("/download-entities", express.json(), async (req, res) => {
     const { requests } = req.body;
+    if (!Array.isArray(requests) || requests.length > 10_000) {
+      return sendHttpError(
+        res,
+        400,
+        "requests must be an array of at most 10000 items",
+        { code: "SYNC_REQUEST_INVALID", stage: "owner_metadata" },
+      );
+    }
 
     try {
-      const results = await downloadEntities(requests);
+      const results = (await downloadEntities(requests)).map((result) =>
+        normalizeFailureResult(result, {
+          code: "SYNC_ENTITY_READ_FAILED",
+          stage: entityStage(result?.type),
+          failedTopicIds: failedTopicIds(result?.type, result?.id),
+        }),
+      );
       res.json(results);
     } catch (e) {
-      res.status(500).json({ error: e.message });
+      sendHttpError(res, 500, e, {
+        code: "SYNC_ENTITY_READ_FAILED",
+        stage: "owner_metadata",
+      });
     }
   });
 
@@ -107,20 +175,41 @@ function registerRoutes(app, { syncToken, appDataPath, centralSync = null }) {
     express.json({ limit: "5mb" }),
     async (req, res) => {
       const opId = req.headers["x-idempotency-key"];
-      const { duplicate, result: prevResult } = checkIdempotency(opId);
+      const {
+        duplicate,
+        result: prevResult,
+        statusCode: previousStatus = 200,
+      } = checkIdempotency(opId);
       if (duplicate) {
         logger.logOperation("http", "idempotency", "upload-entity", "warn", `duplicate detected: ${opId}`);
-        return res.json(prevResult);
+        return res.status(previousStatus).json(
+          normalizeFailureResult(prevResult, {
+            code: "SYNC_ENTITY_WRITE_FAILED",
+            stage: entityStage(prevResult?.type),
+          }),
+        );
       }
 
       const { id, type, data } = req.body;
 
       try {
-        const result = await uploadEntity({ id, type, data, appDataPath });
-        recordOperation(opId, result);
-        res.json(result);
+        const result = normalizeFailureResult(
+          await uploadEntity({ id, type, data, appDataPath }),
+          {
+            code: "SYNC_ENTITY_WRITE_FAILED",
+            stage: entityStage(type),
+            failedTopicIds: failedTopicIds(type, id),
+          },
+        );
+        const statusCode = result?.success === true ? 200 : 409;
+        recordOperation(opId, result, statusCode);
+        res.status(statusCode).json(result);
       } catch (e) {
-        res.status(500).json({ error: e.message });
+        sendHttpError(res, 500, e, {
+          code: "SYNC_ENTITY_WRITE_FAILED",
+          stage: entityStage(type),
+          failedTopicIds: failedTopicIds(type, id),
+        });
       }
     },
   );
@@ -132,14 +221,36 @@ function registerRoutes(app, { syncToken, appDataPath, centralSync = null }) {
     async (req, res) => {
       const { items } = req.body;
       if (!Array.isArray(items)) {
-        return res.status(400).json({ error: "items must be an array" });
+        return sendHttpError(res, 400, "items must be an array", {
+          code: "SYNC_REQUEST_INVALID",
+          stage: "topic_metadata",
+        });
+      }
+      if (items.length > 10_000) {
+        return sendHttpError(res, 413, "items exceed the 10000 item budget", {
+          code: "SYNC_BUDGET_EXCEEDED",
+          stage: "topic_metadata",
+        });
       }
 
       try {
-        const results = await uploadEntitiesBatch(items, appDataPath);
-        res.json({ success: true, results });
+        const results = (await uploadEntitiesBatch(items, appDataPath)).map(
+          (result) => normalizeFailureResult(result, {
+            code: "SYNC_ENTITY_BATCH_FAILED",
+            stage: "topic_metadata",
+            failedTopicIds:
+              typeof result?.id === "string" ? [result.id] : [],
+          }),
+        );
+        const success =
+          results.length === items.length &&
+          results.every((result) => result?.success === true);
+        res.json({ success, results });
       } catch (e) {
-        res.status(500).json({ error: e.message });
+        sendHttpError(res, 500, e, {
+          code: "SYNC_ENTITY_BATCH_FAILED",
+          stage: "topic_metadata",
+        });
       }
     },
   );
@@ -148,7 +259,10 @@ function registerRoutes(app, { syncToken, appDataPath, centralSync = null }) {
   router.post("/download-messages-stream", express.json({ limit: "5mb" }), async (req, res) => {
     const { requests } = req.body;
     if (!Array.isArray(requests) || requests.length === 0) {
-      return res.status(400).json({ error: "requests must be a non-empty array" });
+      return sendHttpError(res, 400, "requests must be a non-empty array", {
+        code: "SYNC_REQUEST_INVALID",
+        stage: "messages",
+      });
     }
 
     try {
@@ -159,10 +273,15 @@ function registerRoutes(app, { syncToken, appDataPath, centralSync = null }) {
       }
     } catch (e) {
       if (!res.headersSent) {
-        res.status(500).json({ error: e.message });
+        sendHttpError(res, 500, e, streamErrorFallback(centralSync));
       } else {
         // 流已经开始，写入错误帧并结束
-        res.write(JSON.stringify({ _stream_error: e.message }) + "\n");
+        res.write(
+          `${JSON.stringify(createStreamErrorFrame(
+            e,
+            streamErrorFallback(centralSync),
+          ))}\n`,
+        );
         res.end();
       }
     }
@@ -180,9 +299,14 @@ function registerRoutes(app, { syncToken, appDataPath, centralSync = null }) {
         }
       } catch (e) {
         if (!res.headersSent) {
-          res.status(500).json({ error: e.message });
+          sendHttpError(res, 500, e, streamErrorFallback(centralSync));
         } else {
-          res.write(JSON.stringify({ _stream_error: e.message }) + "\n");
+          res.write(
+            `${JSON.stringify(createStreamErrorFrame(
+              e,
+              streamErrorFallback(centralSync),
+            ))}\n`,
+          );
           res.end();
         }
       }
@@ -192,23 +316,35 @@ function registerRoutes(app, { syncToken, appDataPath, centralSync = null }) {
   // 5. 上传附件
   router.post(
     "/upload-attachment",
-    express.raw({ type: "*/*", limit: "100mb" }),
-
     async (req, res) => {
       const { hash, name, type } = req.query;
-      if (!hash) return res.status(400).send("Missing hash");
+      if (!hash) {
+        return sendHttpError(res, 400, "Missing hash", {
+          code: "MOBILE_ATTACHMENT_INVALID",
+          stage: "messages",
+        });
+      }
+
+      const rawLength = req.headers["content-length"];
+      const declaredLength = rawLength === undefined
+        ? undefined
+        : Number(rawLength);
 
       try {
-        const result = await uploadAttachment({
+        const result = await uploadAttachmentStream({
           hash,
-          data: req.body,
+          input: req,
+          declaredLength,
           name,
           type,
           appDataPath,
         });
         res.json(result);
       } catch (e) {
-        res.status(500).json({ error: e.message });
+        sendHttpError(res, 500, e, {
+          code: "SYNC_ATTACHMENT_WRITE_FAILED",
+          stage: "messages",
+        });
       }
     },
   );
@@ -220,11 +356,17 @@ function registerRoutes(app, { syncToken, appDataPath, centralSync = null }) {
     try {
       const result = await downloadAttachment(hash);
       if (!result) {
-        return res.status(404).send("Not Found");
+        return sendHttpError(res, 404, "Attachment not found", {
+          code: "SYNC_ATTACHMENT_NOT_FOUND",
+          stage: "messages",
+        });
       }
       res.sendFile(result.filePath);
     } catch (e) {
-      res.status(500).json({ error: e.message });
+      sendHttpError(res, 500, e, {
+        code: "SYNC_ATTACHMENT_READ_FAILED",
+        stage: "messages",
+      });
     }
   });
 
@@ -236,18 +378,24 @@ function registerRoutes(app, { syncToken, appDataPath, centralSync = null }) {
     try {
       const result = await downloadAvatar(id, type);
       if (!result) {
-        return res.status(404).send("Not Found");
+        return sendHttpError(res, 404, "Avatar not found", {
+          code: "SYNC_AVATAR_NOT_FOUND",
+          stage: "owner_metadata",
+        });
       }
       res.sendFile(result.filePath);
     } catch (e) {
-      res.status(500).json({ error: e.message });
+      sendHttpError(res, 500, e, {
+        code: "SYNC_AVATAR_READ_FAILED",
+        stage: "owner_metadata",
+      });
     }
   });
 
   // 8. 上传头像
   router.post(
     "/upload-avatar",
-    express.raw({ type: "*/*", limit: "10mb" }),
+    express.raw({ type: "*/*", limit: "20mb" }),
     async (req, res) => {
       const { id, type } = req.query;
 
@@ -260,78 +408,163 @@ function registerRoutes(app, { syncToken, appDataPath, centralSync = null }) {
         });
         res.json(result);
       } catch (e) {
-        res.status(500).json({ error: e.message });
+        sendHttpError(res, 500, e, {
+          code: "SYNC_AVATAR_WRITE_FAILED",
+          stage: "owner_metadata",
+        });
       }
     },
   );
 
   // 9. 删除实体
   router.post("/delete-entity", express.json(), async (req, res) => {
-    const { id, type, deletedAt } = req.body;
+    const { id, type, ownerType = null, deletedAt } = req.body;
+    const allowedTypes = new Set([
+      "agent",
+      "group",
+      "topic",
+      "agent_topic",
+      "group_topic",
+      "avatar",
+    ]);
 
-    if (!id || !type || !deletedAt) {
-      return res.status(400).json({ error: "Missing required fields" });
+    if (
+      typeof id !== "string" ||
+      id.length === 0 ||
+      !allowedTypes.has(type) ||
+      !Number.isSafeInteger(deletedAt) ||
+      deletedAt < 0 ||
+      (type === "avatar" && !["agent", "group", "user"].includes(ownerType))
+    ) {
+      return sendHttpError(res, 400, "Invalid delete entity fields", {
+        code: "SYNC_DELETE_INVALID",
+        stage: entityStage(type),
+      });
     }
 
     try {
       const result = await deleteEntity({
         id,
         type,
+        ownerType,
         deletedAt,
         appDataPath,
       });
-      res.json(result);
+      const response = normalizeFailureResult(result, {
+        code: "SYNC_DELETE_FAILED",
+        stage: entityStage(type),
+        failedTopicIds: failedTopicIds(type, id),
+      });
+      res.status(response?.success === true ? 200 : 409).json(response);
     } catch (e) {
-      res.status(500).json({ error: e.message });
+      sendHttpError(res, 500, e, {
+        code: "SYNC_DELETE_FAILED",
+        stage: entityStage(type),
+        failedTopicIds: failedTopicIds(type, id),
+      });
     }
   });
 
   // 10. 删除消息。中央模式通过 Push 的 deletedMessageIds 原子投影，
   // 避免旧私有墓碑与 CDS 墓碑发生双写。
   router.post("/delete-message", express.json(), async (req, res) => {
-    const { msgId, deletedAt, topicId, ownerType, ownerId } = req.body;
+    const { msgId, deletedAt, topicId } = req.body;
 
-    if (!msgId || !deletedAt) {
-      return res.status(400).json({ error: "Missing required fields" });
+    if (
+      typeof msgId !== "string" ||
+      msgId.length === 0 ||
+      typeof topicId !== "string" ||
+      topicId.length === 0 ||
+      !Number.isSafeInteger(deletedAt) ||
+      deletedAt < 0
+    ) {
+      return sendHttpError(res, 400, "Missing required fields", {
+        code: "SYNC_DELETE_INVALID",
+        stage: "messages",
+        failedTopicIds:
+          typeof topicId === "string" && topicId.length > 0 ? [topicId] : [],
+      });
     }
 
     try {
       if (centralSync) {
-        if (!topicId || !ownerType || !ownerId) {
-          return res.status(400).json({
-            error: "Central delete requires topicId, ownerType and ownerId",
-          });
-        }
-        const result = await centralSync.requireClient().syncMessagesPush({
-          topics: [{
-            topicId,
-            ownerType,
-            ownerId,
-            messages: [],
-            deletedMessageIds: [msgId],
-          }],
-        });
-        return res.json(result.results?.[0] || { success: false });
+        return res.json(
+          await centralSync.deleteMessage({ topicId, msgId, deletedAt }),
+        );
       }
-      const result = await deleteMessage({ msgId, deletedAt, topicId });
-      res.json(result);
+      const result = await deleteMessage({
+        msgId,
+        deletedAt,
+        topicId,
+        appDataPath,
+      });
+      const response = normalizeFailureResult(result, {
+        code: "SYNC_DELETE_FAILED",
+        stage: "messages",
+        failedTopicIds: [topicId],
+      });
+      res.status(response?.success === true ? 200 : 409).json(response);
     } catch (e) {
-      res.status(500).json({ error: e.message });
+      sendHttpError(res, 500, e, {
+        code: "SYNC_DELETE_FAILED",
+        stage: "messages",
+        failedTopicIds: [topicId],
+      });
     }
   });
 
   // Change Feed 为移动端断线续传与删除事件提供中央游标。
   router.get("/changes", async (req, res) => {
     if (!centralSync) {
-      return res.status(404).json({ error: "Central sync is disabled" });
+      return sendHttpError(res, 404, "Central sync is disabled", {
+        code: "SYNC_CHANGE_FEED_UNAVAILABLE",
+        stage: "history",
+      });
     }
     try {
       const after = Number.parseInt(req.query.after || "0", 10) || 0;
       const limit = Number.parseInt(req.query.limit || "200", 10) || 200;
       res.json(await centralSync.changes(after, limit));
     } catch (e) {
-      res.status(500).json({ error: e.message });
+      sendHttpError(res, 500, e, {
+        code: "SYNC_CHANGE_FEED_FAILED",
+        origin: "desktop_cds",
+        stage: "history",
+      });
     }
+  });
+
+  // Keep parser failures and unknown MobileSync routes inside the same Wire
+  // contract. Route-level express.json() errors otherwise bypass the handlers
+  // above and fall through to the host application's generic HTML response.
+  router.use((req, res) => sendHttpError(res, 404, "Unknown MobileSync route", {
+    code: "SYNC_REQUEST_INVALID",
+    stage: requestStage(req),
+  }));
+  router.use((error, req, res, next) => {
+    if (res.headersSent) return next(error);
+    const status = Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599
+      ? error.status
+      : 500;
+    const tooLarge = status === 413 || error?.type === "entity.too.large";
+    const invalidJson = status === 400 || error?.type === "entity.parse.failed";
+    return sendHttpError(
+      res,
+      tooLarge ? 413 : invalidJson ? 400 : status,
+      tooLarge
+        ? "Request body exceeds the endpoint byte budget"
+        : invalidJson
+          ? "Request body is not valid JSON"
+          : error,
+      {
+        code: tooLarge
+          ? "SYNC_BUDGET_EXCEEDED"
+          : invalidJson
+            ? "SYNC_REQUEST_INVALID"
+            : "SYNC_ATTEMPT_FAILED",
+        stage: requestStage(req),
+      },
+    );
   });
 
   app.use("/api/mobile-sync", router);

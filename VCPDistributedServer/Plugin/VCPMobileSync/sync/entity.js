@@ -4,6 +4,7 @@
 
 const fs = require("fs").promises;
 const path = require("path");
+const crypto = require("crypto");
 const {
   getDb,
   getEntityIndex,
@@ -12,6 +13,7 @@ const {
   upsertAvatarIndex,
   softDeleteEntityIndex,
   softDeleteAvatarIndex,
+  softDeleteMessageIndex,
 } = require("../core/db");
 const {
   computeBinaryHash,
@@ -26,6 +28,11 @@ const {
 } = require("../config/defaults");
 const { acquireLock } = require("../utils/lock");
 const { getLogger } = require("../core/logger");
+const {
+  createSyncError,
+  normalizeSyncError,
+  withSyncErrorContext,
+} = require("../error-contract");
 const {
   extractAgentDTO,
   applyAgentDTO,
@@ -49,6 +56,20 @@ const {
 
 const writeIntentLock = new Set();
 
+function entityStage(type) {
+  return ["topic", "agent_topic", "group_topic"].includes(type)
+    ? "topic_metadata"
+    : "owner_metadata";
+}
+
+function entityFailure(error, fallback, fields = {}) {
+  return {
+    success: false,
+    ...fields,
+    error: normalizeSyncError(error, fallback),
+  };
+}
+
 /**
  * 下载实体 - 从桌面端配置提取 DTO
  * @param {object} params
@@ -59,9 +80,22 @@ const writeIntentLock = new Set();
 async function downloadEntity({ id, type }) {
   const db = getDb();
   const logger = getLogger();
-  if (!db) return null;
+  if (!db) {
+    throw createSyncError("SYNC_DB_UNAVAILABLE", "Database not initialized", {
+      stage: entityStage(type),
+    });
+  }
 
   const safeId = sanitizeId(id);
+  if (
+    !safeId ||
+    safeId !== id ||
+    !["agent", "group", "topic", "agent_topic", "group_topic"].includes(type)
+  ) {
+    throw createSyncError("SYNC_REQUEST_INVALID", "Invalid entity identity", {
+      stage: entityStage(type),
+    });
+  }
   const phase = (type === "topic" || type === "agent_topic" || type === "group_topic") ? "topic_metadata" : "owner_metadata";
 
   const row = getEntityIndex(safeId, type);
@@ -96,7 +130,11 @@ async function downloadEntity({ id, type }) {
     }
   } catch (e) {
     logger.logOperation(phase, "download", safeId, "error", e.message);
-    return null;
+    throw withSyncErrorContext(e, {
+      code: "SYNC_ENTITY_READ_FAILED",
+      stage: phase,
+      failedTopicIds: entityStage(type) === "topic_metadata" ? [safeId] : [],
+    });
   }
 }
 
@@ -110,10 +148,37 @@ async function downloadEntities(requests) {
 
   // 按 file_path 分组，每个 config.json 只读取一次
   const fileGroups = new Map();
+  const results = [];
+  const seen = new Set();
   for (const req of requests) {
     const safeId = sanitizeId(req.id);
+    const key = `${req.type || ""}:${safeId}`;
+    const validType = [
+      "agent",
+      "group",
+      "topic",
+      "agent_topic",
+      "group_topic",
+    ].includes(req.type);
+    if (!safeId || safeId !== req.id || !validType || seen.has(key)) {
+      results.push(entityFailure(
+        seen.has(key) ? "duplicate entity request" : "invalid entity identity",
+        { code: "SYNC_REQUEST_INVALID", stage: entityStage(req.type) },
+        { id: req.id, type: req.type },
+      ));
+      continue;
+    }
+    seen.add(key);
     const row = getEntityIndex(safeId, req.type);
-    if (!row) continue;
+    if (!row) {
+      results.push(entityFailure("entity not found", {
+        code: "SYNC_ENTITY_NOT_FOUND",
+        stage: entityStage(req.type),
+        failedTopicIds:
+          entityStage(req.type) === "topic_metadata" ? [safeId] : [],
+      }, { id: req.id, type: req.type }));
+      continue;
+    }
 
     if (!fileGroups.has(row.file_path)) {
       fileGroups.set(row.file_path, {
@@ -124,7 +189,6 @@ async function downloadEntities(requests) {
     fileGroups.get(row.file_path).reqs.push({ req, safeId });
   }
 
-  const results = [];
   const logger = getLogger();
 
   for (const [filePath, { isGroup, reqs }] of fileGroups) {
@@ -154,11 +218,30 @@ async function downloadEntities(requests) {
         }
 
         if (dto) {
-          results.push({ id: req.id, type, data: dto });
+          results.push({ id: req.id, type, success: true, data: dto });
+        } else {
+          results.push(entityFailure(
+            "entity data was not found in its config",
+            {
+              code: "SYNC_ENTITY_NOT_FOUND",
+              stage: entityStage(type),
+              failedTopicIds:
+                entityStage(type) === "topic_metadata" ? [safeId] : [],
+            },
+            { id: req.id, type },
+          ));
         }
       }
     } catch (e) {
       logger.logOperation("owner_metadata", "download", filePath, "error", e.message);
+      for (const { req } of reqs) {
+        results.push(entityFailure(e, {
+          code: "SYNC_ENTITY_READ_FAILED",
+          stage: entityStage(req.type),
+          failedTopicIds:
+            entityStage(req.type) === "topic_metadata" ? [req.id] : [],
+        }, { id: req.id, type: req.type }));
+      }
     }
   }
 
@@ -182,17 +265,41 @@ async function uploadEntitiesBatch(items, appDataPath) {
   // 1. 预处理：按 configPath 分组
   const fileGroups = new Map(); // Map<configPath, { isTopic, items: [] }>
   const addedIntentLocks = new Set();
+  const seenIds = new Set();
 
   for (const item of items) {
     const { id, type, data } = item;
     const safeId = sanitizeId(id);
+    if (
+      !safeId ||
+      safeId !== id ||
+      seenIds.has(safeId) ||
+      !["agent_topic", "group_topic"].includes(type) ||
+      !data ||
+      typeof data !== "object" ||
+      Array.isArray(data) ||
+      typeof data.ownerId !== "string" ||
+      sanitizeId(data.ownerId) !== data.ownerId
+    ) {
+      results.push(entityFailure(
+        seenIds.has(safeId)
+          ? "Duplicate entity id"
+          : "Batch upload only accepts valid agent_topic/group_topic items",
+        {
+          code: "SYNC_REQUEST_INVALID",
+          stage: "topic_metadata",
+          failedTopicIds: safeId ? [safeId] : [],
+        },
+        { id },
+      ));
+      continue;
+    }
+    seenIds.add(safeId);
     if (safeId) {
       writeIntentLock.add(safeId);
       addedIntentLocks.add(safeId);
     }
-    const isTopic = type === "topic" || type === "agent_topic" || type === "group_topic";
-    const isGroup = type === "group";
-    const baseDirName = isGroup ? "AgentGroups" : "Agents";
+    const isTopic = true;
 
     let configPath;
     let row = getEntityIndex(safeId, type);
@@ -202,14 +309,27 @@ async function uploadEntitiesBatch(items, appDataPath) {
     } else if (isTopic && data.ownerId) {
       const parentBaseDir = (type === "group_topic" || data.ownerType === "group") ? "AgentGroups" : "Agents";
       configPath = path.join(appDataPath, parentBaseDir, data.ownerId, "config.json");
-    } else if (!isTopic) {
-      const newEntityDir = path.join(appDataPath, baseDirName, safeId);
-      configPath = path.join(newEntityDir, "config.json");
-      // 注意：批量上传暂不支持新建 Agent/Group（目录创建逻辑较复杂），仅支持已有实体的 Topic 批量更新
     }
 
     if (!configPath) {
-      results.push({ id, success: false, error: "Cannot resolve config path" });
+      results.push(entityFailure("Cannot resolve config path", {
+        code: "SYNC_ENTITY_NOT_FOUND",
+        stage: "topic_metadata",
+        failedTopicIds: [safeId],
+      }, { id }));
+      continue;
+    }
+    const actualOwnerId = path.basename(path.dirname(configPath));
+    const actualIsGroup = configPath.includes(`${path.sep}AgentGroups${path.sep}`);
+    if (
+      actualOwnerId !== data.ownerId ||
+      actualIsGroup !== (type === "group_topic")
+    ) {
+      results.push(entityFailure("Topic owner identity conflict", {
+        code: "SYNC_OWNER_CONFLICT",
+        stage: "topic_metadata",
+        failedTopicIds: [safeId],
+      }, { id }));
       continue;
     }
 
@@ -224,18 +344,15 @@ async function uploadEntitiesBatch(items, appDataPath) {
     for (const [configPath, group] of fileGroups) {
       const release = await acquireLock(configPath);
       try {
-        let config = {};
-        let fileReadSuccess = false;
-
-        try {
-          const content = await fs.readFile(configPath, "utf-8");
-          if (content.trim()) {
-            config = JSON.parse(content);
-            fileReadSuccess = true;
-          }
-        } catch (e) {
-          if (e.code !== "ENOENT") throw e;
+        const content = await fs.readFile(configPath, "utf-8");
+        if (!content.trim()) {
+          throw new Error("Parent config is empty");
         }
+        let config = JSON.parse(content);
+        if (!config || typeof config !== "object" || Array.isArray(config)) {
+          throw new Error("Parent config root must be an object");
+        }
+        const successfulIds = new Set();
 
         // 依次应用该文件下的所有更新
         for (const item of group.items) {
@@ -252,17 +369,20 @@ async function uploadEntitiesBatch(items, appDataPath) {
                 configPath,
                 appDataPath,
               });
-            } else if (type === "agent") {
-              config = handleAgentUpload({ config, id, data, isNewEntity: !fileReadSuccess, fileReadSuccess });
-            } else if (type === "group") {
-              config = handleGroupUpload({ config, id, data, isNewEntity: !fileReadSuccess, fileReadSuccess });
             }
-            
+
             results.push({ id, success: true });
+            successfulIds.add(id);
           } catch (e) {
-            results.push({ id, success: false, error: e.message });
+            results.push(entityFailure(e, {
+              code: "SYNC_ENTITY_WRITE_FAILED",
+              stage: "topic_metadata",
+              failedTopicIds: [id],
+            }, { id }));
           }
         }
+
+        if (successfulIds.size === 0) continue;
 
         // 原子写入
         const tmpPath = `${configPath}.tmp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
@@ -270,7 +390,7 @@ async function uploadEntitiesBatch(items, appDataPath) {
         await fs.rename(tmpPath, configPath);
 
         // 批量更新索引
-        for (const item of group.items) {
+        for (const item of group.items.filter((item) => successfulIds.has(item.id))) {
           const { id, type } = item;
           const isTopic = type === "topic" || type === "agent_topic" || type === "group_topic";
           if (isTopic) {
@@ -282,12 +402,22 @@ async function uploadEntitiesBatch(items, appDataPath) {
           }
         }
       } catch (e) {
-        // 文件级错误，标记该组所有 item 为失败
+        // 文件级错误，标记该组所有 item 为失败。
+        // 缺口 D：父 config 不存在（ENOENT）时与单条路径（entity.js:497-510）
+        // 对齐为 SYNC_ENTITY_NOT_FOUND——手机端可据此区分"先补建父 Agent"与
+        // 真正的写入失败；其余错误保持 SYNC_ENTITY_BATCH_FAILED。
+        const isMissingParent = e && e.code === "ENOENT";
         logger.logOperation("topic_metadata", "batch_upload", configPath, "error", e.message);
+        const groupIds = new Set(group.items.map((item) => item.id));
+        for (let index = results.length - 1; index >= 0; index -= 1) {
+          if (groupIds.has(results[index].id)) results.splice(index, 1);
+        }
         for (const item of group.items) {
-          if (!results.find(r => r.id === item.id)) {
-            results.push({ id: item.id, success: false, error: `File error: ${e.message}` });
-          }
+          results.push(entityFailure(e, {
+            code: isMissingParent ? "SYNC_ENTITY_NOT_FOUND" : "SYNC_ENTITY_BATCH_FAILED",
+            stage: "topic_metadata",
+            failedTopicIds: [item.id],
+          }, { id: item.id }));
         }
       } finally {
         release();
@@ -311,14 +441,32 @@ async function uploadEntitiesBatch(items, appDataPath) {
  * @param {string} params.type - 实体类型 (agent/group/topic)
  * @param {object} params.data - DTO 数据
  * @param {string} params.appDataPath - AppData 路径
- * @returns {Promise<{success: boolean, error?: string}>}
+ * @returns {Promise<{success: boolean, error?: object}>}
  */
 async function uploadEntity({ id, type, data, appDataPath }) {
   const db = getDb();
   const logger = getLogger();
-  if (!db) return { success: false, error: "Database not initialized" };
+  if (!db) {
+    return entityFailure("Database not initialized", {
+      code: "SYNC_DB_UNAVAILABLE",
+      stage: entityStage(type),
+    });
+  }
 
   const safeId = sanitizeId(id);
+  if (
+    !safeId ||
+    safeId !== id ||
+    !["agent", "group", "agent_topic", "group_topic"].includes(type) ||
+    !data ||
+    typeof data !== "object" ||
+    Array.isArray(data)
+  ) {
+    return entityFailure("Invalid entity upload payload", {
+      code: "SYNC_REQUEST_INVALID",
+      stage: entityStage(type),
+    }, { id });
+  }
   const isTopic =
     type === "topic" || type === "agent_topic" || type === "group_topic";
   const isGroup = type === "group";
@@ -352,16 +500,42 @@ async function uploadEntity({ id, type, data, appDataPath }) {
     );
     try {
       await fs.access(configPath);
-    } catch (e) {
+    } catch {
       logger.logOperation(phase, "upload", safeId, "error", `parent entity ${data.ownerId} not found`);
-      return {
-        success: false,
-        error: `Parent entity ${data.ownerId} not found on desktop`,
-      };
+      return entityFailure(
+        `Parent entity ${data.ownerId} not found on desktop`,
+        {
+          code: "SYNC_ENTITY_NOT_FOUND",
+          stage: "topic_metadata",
+          failedTopicIds: [safeId],
+        },
+        { id: safeId },
+      );
     }
   } else {
     logger.logOperation(phase, "upload", safeId, "error", "topic parent entity metadata missing");
-    return { success: false, error: "Topic parent entity metadata missing" };
+    return entityFailure("Topic parent entity metadata missing", {
+      code: "SYNC_REQUEST_INVALID",
+      stage: "topic_metadata",
+      failedTopicIds: [safeId],
+    }, { id: safeId });
+  }
+
+  if (isTopic) {
+    const actualOwnerId = path.basename(path.dirname(configPath));
+    const actualIsGroup = configPath.includes(`${path.sep}AgentGroups${path.sep}`);
+    if (
+      typeof data.ownerId !== "string" ||
+      sanitizeId(data.ownerId) !== data.ownerId ||
+      data.ownerId !== actualOwnerId ||
+      actualIsGroup !== (type === "group_topic")
+    ) {
+      return entityFailure("Topic owner identity conflict", {
+        code: "SYNC_OWNER_CONFLICT",
+        stage: "topic_metadata",
+        failedTopicIds: [safeId],
+      }, { id: safeId });
+    }
   }
 
   writeIntentLock.add(safeId);
@@ -436,10 +610,14 @@ async function uploadEntity({ id, type, data, appDataPath }) {
     }
 
     logger.logOperation(phase, "upload", safeId, "success", `type=${type}, isNewEntity=${isNewEntity}, fileReadSuccess=${fileReadSuccess}`);
-    return { success: true };
+    return { success: true, id: safeId };
   } catch (e) {
     logger.logOperation(phase, "upload", safeId, "error", e.message);
-    return { success: false, error: e.message };
+    return entityFailure(e, {
+      code: "SYNC_ENTITY_WRITE_FAILED",
+      stage: phase,
+      failedTopicIds: isTopic ? [safeId] : [],
+    }, { id: safeId });
   } finally {
     release();
     setTimeout(() => writeIntentLock.delete(safeId), 1000);
@@ -486,7 +664,7 @@ async function handleTopicUpload({
 }) {
   // 防御：若 config 为数组或无效对象，说明文件读取异常，尝试重新读取父级 config
   if (Array.isArray(config) || config === null || typeof config !== 'object') {
-    logger.logOperation("topic_metadata", "upload", id, "error", `invalid config, refusing to write`);
+    getLogger().logOperation("topic_metadata", "upload", id, "error", "invalid config, refusing to write");
     throw new Error(`Invalid parent config for topic ${id}`);
   }
 
@@ -572,15 +750,26 @@ async function downloadAvatar(id, type) {
   const logger = getLogger();
   if (!db) return null;
 
+  const safeId = sanitizeId(id);
+  if (
+    !safeId ||
+    safeId !== id ||
+    !["agent", "group", "user"].includes(type) ||
+    (type === "user" && safeId !== "user_avatar")
+  ) {
+    throw new Error("Invalid avatar owner identity");
+  }
   const row = db
     .prepare(
-      "SELECT file_path FROM avatar_index WHERE owner_type = ? AND owner_id = ?",
+      "SELECT file_path FROM avatar_index WHERE owner_type = ? AND owner_id = ? AND deleted_at IS NULL",
     )
-    .get(type, id);
+    .get(type, safeId);
   if (!row) {
     logger.logOperation("owner_metadata", "download_avatar", id, "error", `type=${type} not found`);
     return null;
   }
+  const stats = await fs.stat(row.file_path);
+  if (!stats.isFile()) throw new Error("Avatar index does not point to a file");
 
   logger.logOperation("owner_metadata", "download_avatar", id, "success", `type=${type}`);
   return { filePath: row.file_path };
@@ -597,18 +786,61 @@ async function downloadAvatar(id, type) {
 async function uploadAvatar({ id, type, data, appDataPath }) {
   const logger = getLogger();
   const safeId = sanitizeId(id);
+  if (
+    !safeId ||
+    safeId !== id ||
+    !["agent", "group", "user"].includes(type) ||
+    !Buffer.isBuffer(data) ||
+    data.length > 20 * 1024 * 1024 ||
+    (type === "user" && safeId !== "user_avatar")
+  ) {
+    throw new Error("Avatar upload has an invalid owner or exceeds 20 MiB");
+  }
   const isGroup = type === "group";
+  const isUser = type === "user";
+  if (!isUser) {
+    const parent = getEntityIndex(safeId, type);
+    if (!parent || parent.deleted_at != null) {
+      throw new Error(`Avatar owner ${type}/${safeId} is missing or deleted`);
+    }
+  }
   const baseDirName = isGroup ? "AgentGroups" : "Agents";
-  const entityDir = path.join(appDataPath, baseDirName, safeId);
+  const entityDir = isUser
+    ? path.join(appDataPath, "UserData")
+    : path.join(appDataPath, baseDirName, safeId);
 
   // 默认保存为 png
-  const avatarFileName = "avatar.png";
+  const avatarFileName = isUser ? "user_avatar.png" : "avatar.png";
   const avatarPath = path.join(entityDir, avatarFileName);
 
   // 确保目录存在
   await fs.mkdir(entityDir, { recursive: true });
 
-  await fs.writeFile(avatarPath, data);
+  const temporary = path.join(
+    entityDir,
+    `.${avatarFileName}.${crypto.randomUUID()}.tmp`,
+  );
+  const file = await fs.open(temporary, "wx");
+  try {
+    await file.writeFile(data);
+    await file.sync();
+  } finally {
+    await file.close();
+  }
+  try {
+    await fs.rename(temporary, avatarPath);
+    if (process.platform !== "win32") {
+      const parent = await fs.open(entityDir, "r");
+      try {
+        await parent.sync();
+      } finally {
+        await parent.close();
+      }
+    }
+  } catch (error) {
+    await fs.unlink(temporary).catch(() => {});
+    throw error;
+  }
 
   const hash = computeBinaryHash(data);
   upsertAvatarIndex(safeId, type, avatarPath, hash);
@@ -632,6 +864,7 @@ async function uploadAvatar({ id, type, data, appDataPath }) {
       upsertEntityIndex(safeId, "group", configPath, groupHash);
     } catch (e) {
       logger.logOperation("owner_metadata", "upload_avatar", safeId, "error", `update group config failed: ${e.message}`);
+      throw e;
     } finally {
       release();
       setTimeout(() => writeIntentLock.delete(safeId), 1000);
@@ -639,7 +872,7 @@ async function uploadAvatar({ id, type, data, appDataPath }) {
   }
 
   logger.logOperation("owner_metadata", "upload_avatar", safeId, "success", `type=${type}`);
-  return { success: true };
+  return { success: true, id: safeId };
 }
 
 /**
@@ -658,14 +891,41 @@ function isWriteLocked(id) {
  * @param {string} params.type - 实体类型 (agent/group/agent_topic/group_topic/avatar)
  * @param {number} params.deletedAt - 删除时间戳
  * @param {string} params.appDataPath - AppData 路径
- * @returns {Promise<{success: boolean, error?: string}>}
+ * @returns {Promise<{success: boolean, error?: object}>}
  */
-async function deleteEntity({ id, type, deletedAt, appDataPath }) {
+async function deleteEntity({ id, type, ownerType = null, deletedAt, appDataPath }) {
   const db = getDb();
   const logger = getLogger();
-  if (!db) return { success: false, error: "Database not initialized" };
+  if (!db) {
+    return entityFailure("Database not initialized", {
+      code: "SYNC_DB_UNAVAILABLE",
+      stage: entityStage(type),
+    });
+  }
 
   const safeId = sanitizeId(id);
+  const allowedTypes = new Set([
+    "agent",
+    "group",
+    "topic",
+    "agent_topic",
+    "group_topic",
+    "avatar",
+  ]);
+  if (
+    !safeId ||
+    safeId !== id ||
+    !allowedTypes.has(type) ||
+    !Number.isSafeInteger(deletedAt) ||
+    deletedAt < 0 ||
+    (type === "avatar" && !["agent", "group", "user"].includes(ownerType)) ||
+    (type === "avatar" && ownerType === "user" && safeId !== "user_avatar")
+  ) {
+    return entityFailure("Invalid entity deletion payload", {
+      code: "SYNC_DELETE_INVALID",
+      stage: entityStage(type),
+    }, { id });
+  }
   const isTopic = type === "agent_topic" || type === "group_topic" || type === "topic";
   const actualPhase = isTopic ? "topic_metadata" : "owner_metadata";
 
@@ -683,9 +943,12 @@ async function deleteEntity({ id, type, deletedAt, appDataPath }) {
 
   try {
     if (type === "avatar") {
-      softDeleteAvatarIndex(safeId, "agent", deletedAt);
+      if (!["agent", "group", "user"].includes(ownerType)) {
+        throw new Error("Avatar deletion requires a valid ownerType");
+      }
+      softDeleteAvatarIndex(safeId, ownerType, deletedAt);
       logger.logOperation(actualPhase, "delete", safeId, "success", "type=avatar, soft deleted");
-      return { success: true };
+      return { success: true, id: safeId };
     }
 
     let entityDir = null;
@@ -694,12 +957,19 @@ async function deleteEntity({ id, type, deletedAt, appDataPath }) {
       if (type === "agent" || type === "group") {
         entityDir = path.dirname(row.file_path);
       }
-    } else if (type === "agent" || type === "group") {
-      const baseDirName = type === "group" ? "AgentGroups" : "Agents";
-      entityDir = path.join(appDataPath, baseDirName, safeId);
     }
 
-    softDeleteEntityIndex(safeId, type, deletedAt);
+    softDeleteEntityIndex(safeId, row?.type || type, deletedAt);
+    if (row && (type === "agent" || type === "group")) {
+      softDeleteAvatarIndex(safeId, type, deletedAt);
+      db.prepare(
+        `UPDATE entity_index
+         SET deleted_at = CASE
+           WHEN deleted_at IS NULL THEN ?1 ELSE MIN(deleted_at, ?1) END
+         WHERE file_path = ?2
+           AND (type = 'topic' OR type = 'agent_topic' OR type = 'group_topic')`,
+      ).run(deletedAt, row.file_path);
+    }
 
     if (entityDir && (type === "agent" || type === "group")) {
       try {
@@ -707,6 +977,7 @@ async function deleteEntity({ id, type, deletedAt, appDataPath }) {
         logger.logOperation(actualPhase, "delete", safeId, "success", `type=${type}, physical dir removed`);
       } catch (e) {
         logger.logOperation(actualPhase, "delete", safeId, "error", `physical removal failed: ${e.message}`);
+        throw e;
       }
     }
 
@@ -727,14 +998,19 @@ async function deleteEntity({ id, type, deletedAt, appDataPath }) {
           }
         } catch (e) {
           logger.logOperation(actualPhase, "delete", safeId, "error", `remove from parent config failed: ${e.message}`);
+          throw e;
         }
       }
     }
 
-    return { success: true };
+    return { success: true, id: safeId };
   } catch (e) {
     logger.logOperation(actualPhase, "delete", safeId, "error", e.message);
-    return { success: false, error: e.message };
+    return entityFailure(e, {
+      code: "SYNC_DELETE_FAILED",
+      stage: actualPhase,
+      failedTopicIds: isTopic ? [safeId] : [],
+    });
   } finally {
     if (release) release();
     if (isTopic) {
@@ -749,23 +1025,47 @@ async function deleteEntity({ id, type, deletedAt, appDataPath }) {
  * @param {string} params.msgId - 消息 ID
  * @param {number} params.deletedAt - 删除时间戳
  * @param {string} [params.topicId] - 话题 ID
- * @returns {Promise<{success: boolean, error?: string}>}
+ * @returns {Promise<{success: boolean, error?: object}>}
  */
-async function deleteMessage({ msgId, deletedAt, topicId }) {
+async function deleteMessage({ msgId, deletedAt, topicId, appDataPath }) {
   const db = getDb();
   const logger = getLogger();
-  if (!db) return { success: false, error: "Database not initialized" };
+  if (!db) {
+    return entityFailure("Database not initialized", {
+      code: "SYNC_DB_UNAVAILABLE",
+      stage: "messages",
+      failedTopicIds: typeof topicId === "string" ? [topicId] : [],
+    });
+  }
 
   const safeMsgId = sanitizeId(msgId);
   const safeTopicId = topicId ? sanitizeId(topicId) : null;
 
   try {
+    if (
+      !safeMsgId ||
+      safeMsgId !== msgId ||
+      !safeTopicId ||
+      safeTopicId !== topicId ||
+      !Number.isSafeInteger(deletedAt) ||
+      deletedAt < 0
+    ) {
+      throw new Error("Invalid message deletion payload");
+    }
     softDeleteMessageIndex(safeMsgId, deletedAt, safeTopicId);
+    if (safeTopicId && appDataPath) {
+      const { pruneMessageFromPhysicalHistory } = require("./message");
+      await pruneMessageFromPhysicalHistory(safeTopicId, safeMsgId, appDataPath);
+    }
     logger.logOperation("messages", "delete", safeMsgId, "success", `soft deleted in topic ${safeTopicId || 'all'}`);
-    return { success: true };
+    return { success: true, topicId: safeTopicId, msgId: safeMsgId };
   } catch (e) {
     logger.logOperation("messages", "delete", safeMsgId, "error", e.message);
-    return { success: false, error: e.message };
+    return entityFailure(e, {
+      code: "SYNC_DELETE_FAILED",
+      stage: "messages",
+      failedTopicIds: safeTopicId ? [safeTopicId] : [],
+    });
   }
 }
 

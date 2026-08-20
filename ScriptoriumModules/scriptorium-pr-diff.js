@@ -24,10 +24,91 @@
         )[0];
     }
 
+    function normalizeSourceLines(source) {
+        return String(source || '').replace(/\r\n?/g, '\n').split('\n');
+    }
+
+    function appendToSource(source, value) {
+        const text = String(source || '').replace(/\r\n?/g, '\n');
+        const appended = String(value ?? '').replace(/\r\n?/g, '\n');
+        if (!text) {
+            return {
+                success: true,
+                source: appended,
+                line: 1,
+            };
+        }
+        const line = text.split('\n').length + (text.endsWith('\n') ? 0 : 1);
+        return {
+            success: true,
+            source: `${text}${text.endsWith('\n') ? '' : '\n'}${appended}`,
+            line,
+        };
+    }
+
+    function insertAtLine(source, value, requestedLine) {
+        const lines = normalizeSourceLines(source);
+        const line = Number(requestedLine);
+        if (!Number.isInteger(line) || line < 1) {
+            return {
+                success: false,
+                code: 'INVALID_INSERT_LINE',
+                message: 'PR insert 的 line 必须是从 1 开始的整数。',
+            };
+        }
+
+        // line 表示插入内容最终占据的 1-based 行号。
+        // 因此 line=1004、原文 1000 行时，需要先补出 1001-1003
+        // 三个空行，再把内容放到 1004 行。
+        while (lines.length < line - 1) lines.push('');
+        lines.splice(line - 1, 0, String(value ?? ''));
+        return {
+            success: true,
+            source: lines.join('\n'),
+            line,
+        };
+    }
+
     function applyReplacements(source, replacements = []) {
         let output = String(source || '');
         const applied = [];
         for (const replacement of replacements) {
+            const hasAppend = replacement
+                && Object.prototype.hasOwnProperty.call(replacement, 'append');
+            if (hasAppend) {
+                const result = appendToSource(output, replacement.append);
+                output = result.source;
+                applied.push({
+                    type: 'append',
+                    line: result.line,
+                    append: String(replacement.append ?? ''),
+                });
+                continue;
+            }
+
+            const hasInsert = replacement
+                && Object.prototype.hasOwnProperty.call(replacement, 'insert');
+            if (hasInsert) {
+                const result = insertAtLine(
+                    output,
+                    replacement.insert,
+                    replacement.line
+                );
+                if (!result.success) {
+                    return Object.freeze({
+                        ...result,
+                        source: String(source || ''),
+                    });
+                }
+                output = result.source;
+                applied.push({
+                    type: 'insert',
+                    line: result.line,
+                    insert: String(replacement.insert ?? ''),
+                });
+                continue;
+            }
+
             const target = String(replacement?.target || '');
             const offset = locateTarget(
                 output,
@@ -89,6 +170,26 @@
             host.replaceChildren();
             replacements.forEach((replacement, index) => {
                 appendLine(host, 'hunk', `@@ replacement ${index + 1} @@`);
+                if (Object.prototype.hasOwnProperty.call(replacement || {}, 'append')) {
+                    appendLine(host, 'context', '@@ append at end @@');
+                    String(replacement.append ?? '')
+                        .replace(/\r\n?/g, '\n')
+                        .split('\n')
+                        .forEach((line) => appendLine(host, 'added', `+ ${line}`));
+                    return;
+                }
+                if (Object.prototype.hasOwnProperty.call(replacement || {}, 'insert')) {
+                    appendLine(
+                        host,
+                        'context',
+                        `@@ insert line ${replacement.line ?? '?'} @@`
+                    );
+                    String(replacement.insert ?? '')
+                        .replace(/\r\n?/g, '\n')
+                        .split('\n')
+                        .forEach((line) => appendLine(host, 'added', `+ ${line}`));
+                    return;
+                }
                 String(replacement.target || '').replace(/\r\n?/g, '\n')
                     .split('\n')
                     .forEach((line) => appendLine(host, 'removed', `− ${line}`));
@@ -142,23 +243,146 @@ ${String(css).replace(/<\/style/gi, '<\\/style')}
             host.replaceChildren(canvases);
         }
 
-        function render(checkpoint) {
+        function stateSource(state, proposal = {}) {
+            if (!state || typeof state !== 'object') return '';
+            const sourceKind = String(proposal.sourceKind || '');
+            if (sourceKind === 'document-css') {
+                return String(state.documentCss || '');
+            }
+            if (sourceKind === 'deck-css') return String(state.deckCss || '');
+            const index = Number(proposal.slideIndex);
+            const targetsSlide = sourceKind === 'slide'
+                || sourceKind === 'slide-source'
+                || Number.isInteger(index);
+            if (targetsSlide && Array.isArray(state.slides)) {
+                const slide = state.slides[
+                    Number.isInteger(index) ? index : 0
+                ];
+                return String(slide?.source || '');
+            }
+            return String(state.source || '');
+        }
+
+        function hasHistoricalState(checkpoint) {
+            const changeSet = checkpoint?.changeSet;
+            return Boolean(
+                changeSet
+                && typeof changeSet === 'object'
+                && Object.prototype.hasOwnProperty.call(changeSet, 'before')
+                && Object.prototype.hasOwnProperty.call(changeSet, 'after')
+            );
+        }
+
+        function renderSemanticFallback(visualHost, sourceHost, checkpoint) {
+            const status = String(checkpoint?.status || 'applied');
+            const author = checkpoint?.author?.name
+                || checkpoint?.author?.signature
+                || '未知作者';
+            const descriptions = {
+                conflict:
+                    '该提案因修订冲突未应用，文档内容没有发生变化。',
+                rejected:
+                    '该提案已被拒绝，文档内容没有发生变化。',
+                failed:
+                    '该提案应用失败，文档内容没有发生变化。',
+                applied:
+                    checkpoint?.operation?.type === 'project-create'
+                        ? `文档由 ${author} 创建。`
+                        : '该节点记录了一次结构或状态变更。',
+            };
+            visualHost.replaceChildren();
+            const notice = document.createElement('div');
+            notice.className = `pr-render-fallback ${status}`;
+            notice.textContent = descriptions[status]
+                || checkpoint?.summary
+                || checkpoint?.name
+                || '此节点没有可渲染的文本差异。';
+            visualHost.appendChild(notice);
+            sourceHost.replaceChildren();
+            appendLine(
+                sourceHost,
+                'hunk',
+                `@@ ${checkpoint?.name || '文脉节点'} @@`
+            );
+            appendLine(
+                sourceHost,
+                'context',
+                checkpoint?.receipt?.message
+                    || checkpoint?.summary
+                    || '无源码变更'
+            );
+            return false;
+        }
+
+        function render(checkpoint, targetElements = {}) {
             const proposal = checkpoint?.proposal || {};
             const replacements = Array.isArray(proposal.replacements)
                 ? proposal.replacements
                 : [];
-            const sourceHost = elements['pr-source-diff'];
-            const visualHost = elements['pr-render-diff'];
+            const sourceHost = targetElements.sourceHost
+                || elements['pr-source-diff'];
+            const visualHost = targetElements.visualHost
+                || elements['pr-render-diff'];
+            if (!sourceHost || !visualHost) return false;
+
+            const historicalBefore = stateSource(
+                checkpoint?.changeSet?.before,
+                proposal
+            );
+            const historicalAfter = stateSource(
+                checkpoint?.changeSet?.after,
+                proposal
+            );
+            if (hasHistoricalState(checkpoint)) {
+                if (replacements.length) renderSource(sourceHost, replacements);
+                else {
+                    sourceHost.replaceChildren();
+                    appendLine(sourceHost, 'hunk', '@@ 历史状态变更 @@');
+                    String(historicalBefore).split(/\r?\n/)
+                        .forEach((line) =>
+                            appendLine(sourceHost, 'removed', `− ${line}`)
+                        );
+                    String(historicalAfter).split(/\r?\n/)
+                        .forEach((line) =>
+                            appendLine(sourceHost, 'added', `+ ${line}`)
+                        );
+                }
+                renderVisual(
+                    visualHost,
+                    historicalBefore,
+                    historicalAfter,
+                    proposal
+                );
+                return true;
+            }
+
             if (!replacements.length) {
-                sourceHost.textContent = JSON.stringify(proposal, null, 2);
-                visualHost.textContent = proposal.type || '结构变更';
-                return false;
+                return renderSemanticFallback(
+                    visualHost,
+                    sourceHost,
+                    checkpoint
+                );
             }
             renderSource(sourceHost, replacements);
             const before = currentAdapter().proposalSource?.(proposal)
                 || currentAdapter().currentSource();
             const result = applyReplacements(before, replacements);
             if (!result.success) {
+                // conflict/rejected 的 target 可能已不在当前修订中，但原提案
+                // 仍应可读；使用 target/replace 本身构造隔离对照。
+                if (['conflict', 'rejected', 'failed'].includes(
+                    checkpoint?.status
+                )) {
+                    renderVisual(
+                        visualHost,
+                        replacements.map((item) => item.target || '').join('\n'),
+                        replacements.map((item) =>
+                            item.replace ?? item.replacement ?? ''
+                        ).join('\n'),
+                        proposal
+                    );
+                    return true;
+                }
                 visualHost.textContent = result.message;
                 return false;
             }

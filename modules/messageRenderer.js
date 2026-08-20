@@ -35,6 +35,13 @@ import { createMessageSkeleton, formatMessageTimestamp } from './renderer/domBui
 import * as streamManager from './renderer/streamManager.js';
 import * as emoticonUrlFixer from './renderer/emoticonUrlFixer.js';
 import { createContentPipeline, PIPELINE_MODES } from './renderer/contentPipeline.js';
+import {
+    TOOL_REQUEST_START_MARKER as TOOL_START_MARKER,
+    TOOL_REQUEST_END_MARKER as TOOL_END_MARKER,
+    findToolRequestEnd,
+    isBacktickWrappedToolMarker as isBacktickWrappedMarker,
+    replaceToolRequestBlocks
+} from './renderer/toolRequestScanner.js';
 
 const colorExtractionPromises = new Map();
 
@@ -306,8 +313,6 @@ function restoreLatexBlocks(html, map) {
 
 // --- Pre-compiled Regular Expressions for Performance ---
 const TOOL_REGEX = /(?<!`)<<<\[TOOL_REQUEST\]>>>(.*?)<<<\[END_TOOL_REQUEST\]>>>(?!`)/gs;
-const TOOL_START_MARKER = '<<<[TOOL_REQUEST]>>>';
-const TOOL_END_MARKER = '<<<[END_TOOL_REQUEST]>>>';
 const NOTE_REGEX = /<<<DailyNoteStart>>>(.*?)<<<DailyNoteEnd>>>/gs;
 const TOOL_RESULT_REGEX = /\[\[VCP调用结果信息汇总:(.*?)VCP调用结果结束\]\]/gs;
 const TOOL_CALL_SUMMARY_REGEX = /\[本轮工具调用摘要:\]([\s\S]*?)\[本轮工具调用摘要结束\]/g;
@@ -325,103 +330,10 @@ const DESKTOP_PUSH_REGEX = /(?<!`)<<<\[DESKTOP_PUSH\]>>>([\s\S]*?)<<<\[DESKTOP_P
 const DESKTOP_PUSH_PARTIAL_REGEX = /(?<!`)<<<\[DESKTOP_PUSH\]>>>([\s\S]*)$/s; // 流式传输中未闭合的情况
 
 
-function isBacktickWrappedMarker(text, index, marker) {
-    return text[index - 1] === '`' || text[index + marker.length] === '`';
-}
-
-function findMarkedFieldEnd(text, contentStart, isEscape) {
-    const endRegex = isEscape
-        ? /[「{]末[Ee][Ss][Cc][Aa][Pp][Ee][」}]/gi
-        : /[「{]末[」}]/g;
-    endRegex.lastIndex = contentStart;
-    const endMatch = endRegex.exec(text);
-    return endMatch ? endMatch.index + endMatch[0].length : text.length;
-}
-
-function findToolRequestEnd(text, contentStart) {
-    const markerRegex = /<<<\[END_TOOL_REQUEST\]>>>|[「{]始(?:[Ee][Ss][Cc][Aa][Pp][Ee])?[」}]/gi;
-    markerRegex.lastIndex = contentStart;
-
-    while (true) {
-        const match = markerRegex.exec(text);
-        if (!match) return -1;
-
-        const marker = match[0];
-        if (marker === TOOL_END_MARKER) {
-            if (isBacktickWrappedMarker(text, match.index, marker)) {
-                markerRegex.lastIndex = match.index + marker.length;
-                continue;
-            }
-            return match.index + marker.length;
-        }
-
-        const isEscape = /escape/i.test(marker);
-        markerRegex.lastIndex = findMarkedFieldEnd(text, match.index + marker.length, isEscape);
-    }
-}
-
-function replaceToolRequestBlocks(text, replacer) {
-    if (typeof text !== 'string' || !text.includes(TOOL_START_MARKER)) {
-        return text;
-    }
-
-    let result = '';
-    let cursor = 0;
-
-    while (cursor < text.length) {
-        const startIndex = text.indexOf(TOOL_START_MARKER, cursor);
-        if (startIndex === -1) {
-            result += text.slice(cursor);
-            break;
-        }
-
-        if (isBacktickWrappedMarker(text, startIndex, TOOL_START_MARKER)) {
-            result += text.slice(cursor, startIndex + TOOL_START_MARKER.length);
-            cursor = startIndex + TOOL_START_MARKER.length;
-            continue;
-        }
-
-        const contentStart = startIndex + TOOL_START_MARKER.length;
-        const endIndex = findToolRequestEnd(text, contentStart);
-        if (endIndex === -1) {
-            result += text.slice(cursor);
-            break;
-        }
-
-        const fullMatch = text.slice(startIndex, endIndex);
-        const content = text.slice(contentStart, endIndex - TOOL_END_MARKER.length);
-        result += text.slice(cursor, startIndex);
-        result += replacer(fullMatch, content, startIndex, endIndex);
-        cursor = endIndex;
-    }
-
-    return result;
-}
-
 // --- Enhanced Rendering Styles (from UserScript) ---
 function injectEnhancedStyles() {
-    try {
-        // 检查是否已经通过 ID 或 href 引入了该样式表
-        const existingStyleElement = document.getElementById('vcp-enhanced-ui-styles');
-        if (existingStyleElement) return;
-
-        const links = document.getElementsByTagName('link');
-        for (let i = 0; i < links.length; i++) {
-            if (links[i].href && links[i].href.includes('messageRenderer.css')) {
-                return;
-            }
-        }
-
-        // 如果没有引入，则尝试从根路径引入（仅对根目录 HTML 有效）
-        const linkElement = document.createElement('link');
-        linkElement.id = 'vcp-enhanced-ui-styles';
-        linkElement.rel = 'stylesheet';
-        linkElement.type = 'text/css';
-        linkElement.href = 'styles/messageRenderer.css';
-        document.head.appendChild(linkElement);
-    } catch (error) {
-        console.error('VCPSub Enhanced UI: Failed to load external styles:', error);
-    }
+    // The stylesheet is imported through style.css in the legacy cascade layer.
+    // Keeping it there lets the next-UI system override only its own message surface.
 }
 
 // --- Core Logic ---
@@ -1183,7 +1095,12 @@ function transformSpecialBlocks(text, codeBlockMap, thoughtChainMap = null) {
                 toolName = extractedName;
             }
 
-            const escapedFullContent = escapeHtml(restoreBlocks(content));
+            // 工具气泡会在外层继续经过 marked.parse()。如果把参数中的真实换行直接放进
+            // <pre>，空行会终止 CommonMark raw HTML block，导致后续 Markdown 被浏览器
+            // 收进尚未闭合的 <pre>，表现为“后续渲染被吞”。用字符实体保存换行，使整个
+            // 气泡对 Markdown 解析器保持为单行、不可拆分 HTML；写入 DOM 后仍显示为换行。
+            const escapedFullContent = escapeHtml(restoreBlocks(content))
+                .replace(/\r\n?|\n/g, '&#10;');
             return `\n\n<div class="vcp-tool-use-bubble" data-vcp-block-type="tool-use" data-vcp-preserve-children="true">` +
                 `<div class="vcp-tool-summary">` +
                 `<span class="vcp-tool-label">VCP-ToolUse:</span> ` +
@@ -1376,15 +1293,22 @@ function processAndInjectScopedCss(content, scopeId) {
     if (cssContent.length > 0) {
         try {
             const scopedCss = contentProcessor.scopeCss(cssContent, scopeId);
+            const styleSelector = `style[data-vcp-scope-id="${escapeCssAttributeValue(scopeId)}"]`;
+            let styleElement = document.head.querySelector(styleSelector);
 
-            const styleElement = document.createElement('style');
-            styleElement.type = 'text/css';
-            styleElement.setAttribute('data-vcp-scope-id', scopeId);
+            if (!styleElement) {
+                styleElement = document.createElement('style');
+                styleElement.type = 'text/css';
+                styleElement.setAttribute('data-vcp-scope-id', scopeId);
+                document.head.appendChild(styleElement);
+            }
+
+            // 流式渲染会多次经过此函数：复用节点并原子替换文本，
+            // 避免同一消息累积多个样式节点或出现旧规则覆盖新规则。
             styleElement.textContent = scopedCss;
-            document.head.appendChild(styleElement);
             styleInjected = true;
 
-            console.debug(`[ScopedCSS] Injected scoped styles for ID: #${scopeId}`);
+            console.debug(`[ScopedCSS] Updated scoped styles for ID: #${scopeId}`);
         } catch (error) {
             console.error(`[ScopedCSS] Failed to scope or inject CSS for ID: ${scopeId}`, error);
         }
@@ -2233,10 +2157,10 @@ function fixEmoticonUrlsInMarkdown(text) {
  * @property {'user'|'assistant'|'system'} role
  * @property {string} content
  * @property {number} timestamp
- * @property {string} [id] 
+ * @property {string} [id]
  * @property {boolean} [isThinking]
  * @property {Array<{type: string, src: string, name: string}>} [attachments]
- * @property {string} [finishReason] 
+ * @property {string} [finishReason]
  * @property {boolean} [isGroupMessage] // New: Indicates if it's a group message
  * @property {string} [agentId] // New: ID of the speaking agent in a group
  * @property {string} [name] // New: Name of the speaking agent in a group (can override default role name)
@@ -2248,7 +2172,7 @@ function fixEmoticonUrlsInMarkdown(text) {
 /**
  * @typedef {Object} CurrentSelectedItem
  * @property {string|null} id - Can be agentId or groupId
- * @property {'agent'|'group'|null} type 
+ * @property {'agent'|'group'|null} type
  * @property {string|null} name
  * @property {string|null} avatarUrl
  * @property {object|null} config - Full config of the selected item
@@ -2598,6 +2522,7 @@ function initializeMessageRenderer(refs) {
         processRenderedContent: wrappedProcessRenderedContent,
         runTextHighlights: contentProcessor.highlightAllPatternsInMessage,
         preprocessFullContent: preprocessFullContent,
+        processAssistantScopedHtmlContent,
         findToolRequestEnd: (text, startIndex) => findToolRequestEnd(text, startIndex),
         removeSpeakerTags: contentProcessor.removeSpeakerTags,
         ensureNewlineAfterCodeBlock: contentProcessor.ensureNewlineAfterCodeBlock,
@@ -2622,16 +2547,16 @@ function initializeMessageRenderer(refs) {
     mainRendererReferences.chatMessagesDiv.addEventListener('dragover', (e) => {
         const messageItem = e.target.closest('.message-item.user');
         if (!messageItem) return;
-        
+
         const mdContent = messageItem.querySelector('.md-content');
         if (!mdContent) return;
-        
+
         e.preventDefault();
         e.stopPropagation();
-        
+
         // 关键修复：显式设置 dropEffect 允许外部文件放置
         e.dataTransfer.dropEffect = 'copy';
-        
+
         if (!mdContent.classList.contains('drag-over')) {
             console.debug(`[MessageRenderer] Dragover detected on message ${messageItem.dataset.messageId}`);
             mdContent.classList.add('drag-over');
@@ -2641,10 +2566,10 @@ function initializeMessageRenderer(refs) {
     mainRendererReferences.chatMessagesDiv.addEventListener('dragleave', (e) => {
         const messageItem = e.target.closest('.message-item.user');
         if (!messageItem) return;
-        
+
         const mdContent = messageItem.querySelector('.md-content');
         if (!mdContent) return;
-        
+
         // 仅当鼠标真正离开该容器（而不是进入了它的子元素）时才移除类
         const rect = mdContent.getBoundingClientRect();
         if (e.clientX <= rect.left || e.clientX >= rect.right || e.clientY <= rect.top || e.clientY >= rect.bottom) {
@@ -2655,25 +2580,25 @@ function initializeMessageRenderer(refs) {
     mainRendererReferences.chatMessagesDiv.addEventListener('drop', async (e) => {
         const messageItem = e.target.closest('.message-item.user');
         if (!messageItem) return;
-        
+
         const mdContent = messageItem.querySelector('.md-content');
         if (!mdContent) return;
-        
+
         e.preventDefault();
         e.stopPropagation();
         mdContent.classList.remove('drag-over');
-        
+
         const messageId = messageItem.dataset.messageId;
         const files = e.dataTransfer.files;
-        
+
         console.log(`[MessageRenderer] Drop detected on message ${messageId}. Files count: ${files?.length || 0}`);
-        
+
         if (files && files.length > 0) {
             if (window.chatManager && window.chatManager.processFilesData) {
                 // 使用通用的文件读取管线
                 const processedFiles = await window.chatManager.processFilesData(files);
                 const successfulFiles = processedFiles.filter(f => !f.error);
-                
+
                 if (successfulFiles.length > 0) {
                     window.chatManager.addAttachmentsToMessage(messageId, successfulFiles);
                 } else if (processedFiles.length > 0) {
@@ -2980,7 +2905,7 @@ async function renderAttachments(message, contentDiv) {
         message.attachments.forEach((att, index) => {
             const wrapper = document.createElement('div');
             wrapper.classList.add('message-attachment-wrapper');
-            
+
             let attachmentElement;
             if (att.type.startsWith('image/')) {
                 attachmentElement = document.createElement('img');
@@ -3156,6 +3081,10 @@ async function renderPostProcessedHtml(contentDiv, rawHtml, options = {}) {
 }
 
 async function renderMessage(message, isInitialLoad = false, appendToDom = true, renderSessionId = getActiveRenderSessionId(), renderContext = {}) {
+    if (renderSessionId !== null && !isRenderSessionActive(renderSessionId)) {
+        return null;
+    }
+
     // console.debug('[MessageRenderer renderMessage] Received message:', JSON.parse(JSON.stringify(message)));
     const { chatMessagesDiv, electronAPI, markedInstance, uiHelper } = mainRendererReferences;
     const globalSettings = mainRendererReferences.globalSettingsRef.get();
@@ -3248,7 +3177,11 @@ async function renderMessage(message, isInitialLoad = false, appendToDom = true,
 
     // 先添加到DOM
     if (appendToDom) {
+        if (renderSessionId !== null && !isRenderSessionActive(renderSessionId)) {
+            return null;
+        }
         chatMessagesDiv.appendChild(messageItem);
+        window.chatManager?.syncNextUiEmptyStateWithMessages?.();
         // 观察新消息的可见性
         visibilityOptimizer.observeMessage(messageItem);
     }
@@ -3524,7 +3457,7 @@ async function renderMessage(message, isInitialLoad = false, appendToDom = true,
          const currentChatHistoryArray = mainRendererReferences.currentChatHistoryRef.get();
          currentChatHistoryArray.push(message);
          mainRendererReferences.currentChatHistoryRef.set(currentChatHistoryArray); // Update the ref
- 
+
          if (currentSelectedItem.id && mainRendererReferences.currentTopicIdRef.get()) {
               if (currentSelectedItem.type === 'agent') {
                  electronAPI.saveChatHistory(currentSelectedItem.id, mainRendererReferences.currentTopicIdRef.get(), currentChatHistoryArray);
@@ -3557,6 +3490,10 @@ async function renderMessage(message, isInitialLoad = false, appendToDom = true,
 
 function startStreamingMessage(message, messageItem = null) {
     return streamManager.startStreamingMessage(message, messageItem);
+}
+
+function discardStreamingMessage(messageId) {
+    return streamManager.discardStreamingMessage(messageId);
 }
 
 
@@ -3935,6 +3872,7 @@ async function renderMessageBatch(messages, scrollToBottom = false, renderSessio
 
             // Step 1: Append all elements to the DOM at once.
             mainRendererReferences.chatMessagesDiv.appendChild(fragment);
+            window.chatManager?.syncNextUiEmptyStateWithMessages?.();
 
             // Step 2: Now that they are in the DOM, run the deferred processing for each.
             messageElements.forEach(el => processDeferredMessageElement(el, renderSessionId, renderContext));
@@ -3999,6 +3937,7 @@ async function renderOlderMessagesInBatches(olderMessages, batchSize, batchDelay
                 } else {
                     chatMessagesDiv.appendChild(batchFragment);
                 }
+                window.chatManager?.syncNextUiEmptyStateWithMessages?.();
 
                 elementsForProcessing.forEach(el => processDeferredMessageElement(el, renderSessionId, {
                     ...renderContext,
@@ -4060,6 +3999,7 @@ async function renderHistoryLegacy(history, renderSessionId = getActiveRenderSes
 
             // Step 1: Append all elements to the DOM.
             mainRendererReferences.chatMessagesDiv.appendChild(fragment);
+            window.chatManager?.syncNextUiEmptyStateWithMessages?.();
 
             // Step 2: Run the deferred processing for each element now that it's attached.
             allMessageElements.forEach(el => processDeferredMessageElement(el, renderSessionId, renderContext));
@@ -4100,6 +4040,7 @@ window.messageRenderer = {
     renderHistoryLegacy, // Expose the legacy rendering for compatibility
     renderMessageBatch, // Expose batch rendering utility
     startStreamingMessage,
+    discardStreamingMessage,
     appendStreamChunk,
     finalizeStreamedMessage,
     renderFullMessage,
@@ -4160,4 +4101,3 @@ window.messageRenderer = {
         }
     }
 };
-
