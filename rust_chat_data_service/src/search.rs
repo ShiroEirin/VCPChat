@@ -1,4 +1,9 @@
-use std::{collections::HashMap, fs, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+    sync::{Arc, OnceLock},
+};
 
 use anyhow::{Context, Result};
 use jieba_rs::Jieba;
@@ -9,8 +14,7 @@ use tantivy::{
     doc,
     query::{BooleanQuery, Occur, Query, QueryParser, TermQuery},
     schema::{
-        Field, IndexRecordOption, NumericOptions, Schema, TextFieldIndexing, TextOptions, Value,
-        FAST, INDEXED, STORED, STRING,
+        Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED, STRING,
     },
     tokenizer::{LowerCaser, RemoveLongFilter, TextAnalyzer, Token, TokenStream, Tokenizer},
     Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term,
@@ -18,7 +22,7 @@ use tantivy::{
 
 use crate::{
     domain::{MemoryWindow, MessageView, OwnerType, SearchHit, TopicKey},
-    storage::Database,
+    storage::{Database, IngestCommit, SearchUpdate},
 };
 
 const JIEBA_TOKENIZER: &str = "vcp_jieba";
@@ -83,13 +87,9 @@ struct SearchFields {
     owner_type: Field,
     owner_id: Field,
     topic_id: Field,
-    msg_id: Field,
-    ordinal: Field,
-    timestamp: Field,
-    role: Field,
     speaker_name: Field,
     content: Field,
-    message_hash: Field,
+    topic_marker: Field,
 }
 
 impl SearchFields {
@@ -104,13 +104,9 @@ impl SearchFields {
             owner_type: field("owner_type")?,
             owner_id: field("owner_id")?,
             topic_id: field("topic_id")?,
-            msg_id: field("msg_id")?,
-            ordinal: field("ordinal")?,
-            timestamp: field("timestamp")?,
-            role: field("role")?,
             speaker_name: field("speaker_name")?,
             content: field("content")?,
-            message_hash: field("message_hash")?,
+            topic_marker: field("topic_marker")?,
         })
     }
 }
@@ -175,6 +171,124 @@ fn default_max_chars() -> usize {
 }
 
 #[derive(Clone)]
+pub struct SearchRuntime {
+    directory: PathBuf,
+    database: Database,
+    index: Arc<OnceLock<SearchIndex>>,
+    initialization: Arc<Mutex<()>>,
+}
+
+impl SearchRuntime {
+    pub fn new(directory: PathBuf, database: Database) -> Self {
+        Self {
+            directory,
+            database,
+            index: Arc::new(OnceLock::new()),
+            initialization: Arc::new(Mutex::new(())),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn is_initialized(&self) -> bool {
+        self.index.get().is_some()
+    }
+
+    pub fn ensure_initialized(&self) -> Result<&SearchIndex> {
+        if let Some(index) = self.index.get() {
+            return Ok(index);
+        }
+
+        let _guard = self.initialization.lock();
+        if let Some(index) = self.index.get() {
+            return Ok(index);
+        }
+
+        let index = match SearchIndex::open(&self.directory, self.database.clone()) {
+            Ok(index) => index,
+            Err(error) => {
+                let isolated = self
+                    .directory
+                    .parent()
+                    .unwrap_or_else(|| Path::new(""))
+                    .join(format!(
+                        "chat_search_index.corrupt.{}",
+                        crate::storage::now_ms()
+                    ));
+                if self.directory.exists() {
+                    fs::rename(&self.directory, &isolated).with_context(|| {
+                        format!(
+                            "failed to isolate unusable search index at {}",
+                            isolated.display()
+                        )
+                    })?;
+                }
+                tracing::error!(
+                    error = ?error,
+                    isolated_path = %isolated.display(),
+                    "isolated unusable search index; creating a replacement"
+                );
+                SearchIndex::open(&self.directory, self.database.clone())?
+            }
+        };
+        self.index
+            .set(index)
+            .map_err(|_| anyhow::anyhow!("search index initialized concurrently"))?;
+        tracing::info!(directory = %self.directory.display(), "search runtime initialized on demand");
+        Ok(self.index.get().expect("search index was just initialized"))
+    }
+
+    pub fn status(&self) -> SearchStatus {
+        self.index.get().map_or(
+            SearchStatus {
+                available: true,
+                rebuilding: false,
+            },
+            SearchIndex::status,
+        )
+    }
+
+    pub fn apply_ingest_commit_if_initialized(&self, commit: &IngestCommit) -> Result<()> {
+        self.index
+            .get()
+            .map(|index| index.apply_ingest_commit(commit))
+            .transpose()
+            .map(|_| ())
+    }
+
+    pub fn apply_ingest_commits_if_initialized(&self, commits: &[IngestCommit]) -> Result<()> {
+        self.index
+            .get()
+            .map(|index| index.apply_ingest_commits(commits))
+            .transpose()
+            .map(|_| ())
+    }
+
+    pub fn reconcile_revisions_if_initialized(&self) -> Result<usize> {
+        self.index
+            .get()
+            .map(SearchIndex::reconcile_revisions)
+            .transpose()
+            .map(|count| count.unwrap_or(0))
+    }
+
+    pub fn rebuild(&self) -> Result<usize> {
+        self.ensure_initialized()?.rebuild()
+    }
+
+    pub fn search_messages(&self, request: &MessageSearchRequest) -> Result<Vec<SearchHit>> {
+        let index = self.ensure_initialized()?;
+        index.reconcile_revisions()?;
+        index.search_messages(request)
+    }
+
+    pub fn search_memories(&self, request: &MemorySearchRequest) -> Result<Vec<MemoryWindow>> {
+        let index = self.ensure_initialized()?;
+        index.reconcile_revisions()?;
+        index.search_memories(request)
+    }
+}
+
+#[derive(Clone)]
 pub struct SearchIndex {
     index: Index,
     reader: IndexReader,
@@ -233,19 +347,179 @@ impl SearchIndex {
         }
     }
 
-    pub fn update_topic(&self, key: &TopicKey, revision: i64) -> Result<()> {
-        let messages = self.database.active_messages_for_topic(key)?;
-        let mut writer = self.writer.lock();
-        let topic_term = composite_topic_term(&self.fields, key);
-        writer.delete_term(topic_term);
+    pub fn apply_ingest_commit(&self, commit: &IngestCommit) -> Result<()> {
+        self.apply_ingest_commits(std::slice::from_ref(commit))
+    }
 
-        for message in messages {
-            writer.add_document(self.message_document(&message))?;
+    pub fn apply_ingest_commits(&self, commits: &[IngestCommit]) -> Result<()> {
+        enum PendingUpdate {
+            Append { revision: i64, row_ids: Vec<i64> },
+            Rewrite { revision: i64 },
         }
-        writer.commit()?;
+
+        let mut pending = HashMap::<TopicKey, PendingUpdate>::new();
+        for commit in commits {
+            match &commit.search_update {
+                SearchUpdate::None => {}
+                SearchUpdate::Append(row_ids) if !row_ids.is_empty() => {
+                    pending
+                        .entry(commit.topic.clone())
+                        .and_modify(|update| match update {
+                            PendingUpdate::Append {
+                                revision,
+                                row_ids: pending_rows,
+                            } => {
+                                *revision = (*revision).max(commit.revision);
+                                pending_rows.extend(row_ids.iter().copied());
+                            }
+                            PendingUpdate::Rewrite { revision } => {
+                                *revision = (*revision).max(commit.revision);
+                            }
+                        })
+                        .or_insert_with(|| PendingUpdate::Append {
+                            revision: commit.revision,
+                            row_ids: row_ids.clone(),
+                        });
+                }
+                SearchUpdate::Append(_) => {}
+                SearchUpdate::Rewrite => {
+                    pending
+                        .entry(commit.topic.clone())
+                        .and_modify(|update| {
+                            let revision = match update {
+                                PendingUpdate::Append { revision, .. }
+                                | PendingUpdate::Rewrite { revision } => {
+                                    (*revision).max(commit.revision)
+                                }
+                            };
+                            *update = PendingUpdate::Rewrite { revision };
+                        })
+                        .or_insert(PendingUpdate::Rewrite {
+                            revision: commit.revision,
+                        });
+                }
+            }
+        }
+        if pending.is_empty() {
+            return Ok(());
+        }
+        if self
+            .needs_full_rebuild
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.reconcile_revisions()?;
+            return Ok(());
+        }
+
+        let mut updates = pending.into_iter().collect::<Vec<_>>();
+        updates.sort_by(|(left, _), (right, _)| {
+            (left.owner_type.as_str(), &left.owner_id, &left.topic_id).cmp(&(
+                right.owner_type.as_str(),
+                &right.owner_id,
+                &right.topic_id,
+            ))
+        });
+        let append_row_ids = updates
+            .iter()
+            .flat_map(|(_, update)| match update {
+                PendingUpdate::Append { row_ids, .. } => row_ids.as_slice(),
+                PendingUpdate::Rewrite { .. } => &[],
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        let append_messages = self.database.messages_by_row_ids(&append_row_ids)?;
+        anyhow::ensure!(
+            append_messages.len() == append_row_ids.len(),
+            "search append rows changed before indexing"
+        );
+
+        let mut writer = self.writer.lock();
+        for (key, update) in &updates {
+            match update {
+                PendingUpdate::Append { row_ids, .. } => {
+                    for row_id in row_ids {
+                        let document = self.message_document(
+                            append_messages
+                                .get(row_id)
+                                .context("search append message is missing")?,
+                        );
+                        if let Err(error) = writer.add_document(document) {
+                            writer.rollback()?;
+                            return Err(error.into());
+                        }
+                    }
+                }
+                PendingUpdate::Rewrite { .. } => {
+                    writer.delete_term(composite_topic_term(&self.fields, key));
+                    let messages = match self.database.active_messages_for_topic(key) {
+                        Ok(messages) => messages,
+                        Err(error) => {
+                            writer.rollback()?;
+                            return Err(error);
+                        }
+                    };
+                    for message in messages {
+                        if let Err(error) = writer.add_document(self.message_document(&message)) {
+                            writer.rollback()?;
+                            return Err(error.into());
+                        }
+                    }
+                }
+            }
+        }
+        if let Err(error) = writer.commit() {
+            writer.rollback()?;
+            return Err(error.into());
+        }
         drop(writer);
         self.reader.reload()?;
-        self.database.mark_topic_indexed(key, revision)?;
+        let indexed = updates
+            .into_iter()
+            .map(|(key, update)| {
+                let revision = match update {
+                    PendingUpdate::Append { revision, .. }
+                    | PendingUpdate::Rewrite { revision } => revision,
+                };
+                (key, revision)
+            })
+            .collect::<Vec<_>>();
+        self.database.mark_topics_indexed(&indexed)?;
+        Ok(())
+    }
+
+    fn rewrite_topics(&self, topics: &[(TopicKey, i64)], clear_all: bool) -> Result<()> {
+        if topics.is_empty() && !clear_all {
+            return Ok(());
+        }
+        let mut writer = self.writer.lock();
+        if clear_all {
+            writer.delete_all_documents()?;
+        }
+        for (key, _) in topics {
+            if !clear_all {
+                writer.delete_term(composite_topic_term(&self.fields, key));
+            }
+            let messages = match self.database.active_messages_for_topic(key) {
+                Ok(messages) => messages,
+                Err(error) => {
+                    writer.rollback()?;
+                    return Err(error);
+                }
+            };
+            for message in messages {
+                if let Err(error) = writer.add_document(self.message_document(&message)) {
+                    writer.rollback()?;
+                    return Err(error.into());
+                }
+            }
+        }
+        if let Err(error) = writer.commit() {
+            writer.rollback()?;
+            return Err(error.into());
+        }
+        drop(writer);
+        self.reader.reload()?;
+        self.database.mark_topics_indexed(topics)?;
         Ok(())
     }
 
@@ -259,14 +533,12 @@ impl SearchIndex {
             self.database.topics_needing_index()?
         };
         let count = pending.len();
-        for (key, revision) in pending {
-            if let Err(error) = self.update_topic(&key, revision) {
-                if full_rebuild {
-                    self.needs_full_rebuild
-                        .store(true, std::sync::atomic::Ordering::Release);
-                }
-                return Err(error);
+        if let Err(error) = self.rewrite_topics(&pending, full_rebuild) {
+            if full_rebuild {
+                self.needs_full_rebuild
+                    .store(true, std::sync::atomic::Ordering::Release);
             }
+            return Err(error);
         }
         Ok(count)
     }
@@ -280,17 +552,9 @@ impl SearchIndex {
         }
 
         let result = (|| {
-            let mut writer = self.writer.lock();
-            writer.delete_all_documents()?;
-            writer.commit()?;
-            drop(writer);
-
             let topics = self.database.all_active_topic_revisions()?;
-            let mut rebuilt = 0;
-            for (key, revision) in topics {
-                self.update_topic(&key, revision)?;
-                rebuilt += 1;
-            }
+            let rebuilt = topics.len();
+            self.rewrite_topics(&topics, true)?;
             self.needs_full_rebuild
                 .store(false, std::sync::atomic::Ordering::Release);
             Ok(rebuilt)
@@ -443,23 +707,13 @@ impl SearchIndex {
             self.fields.owner_type => message.owner_type.as_str(),
             self.fields.owner_id => message.owner_id.clone(),
             self.fields.topic_id => message.topic_id.clone(),
-            self.fields.msg_id => message.msg_id.clone(),
-            self.fields.ordinal => message.ordinal as u64,
-            self.fields.role => message.role.clone(),
             self.fields.content => message.content_text.clone(),
         );
-        if let Some(timestamp) = message.timestamp {
-            document.add_i64(self.fields.timestamp, timestamp);
-        }
         if let Some(speaker_name) = &message.speaker_name {
             document.add_text(self.fields.speaker_name, speaker_name);
         }
-        let hash = blake3::hash(message.content_raw.as_bytes())
-            .to_hex()
-            .to_string();
-        document.add_text(self.fields.message_hash, hash);
         document.add_text(
-            self.fields.message_hash,
+            self.fields.topic_marker,
             composite_topic_value(message.owner_type, &message.owner_id, &message.topic_id),
         );
         document
@@ -513,29 +767,18 @@ impl SearchIndex {
 
 fn build_schema() -> Schema {
     let mut builder = Schema::builder();
-    let string = STRING | STORED;
-    let numeric = NumericOptions::default()
-        .set_indexed()
-        .set_stored()
-        .set_fast();
     let text_indexing = TextFieldIndexing::default()
         .set_tokenizer(JIEBA_TOKENIZER)
         .set_index_option(IndexRecordOption::WithFreqsAndPositions);
-    let text = TextOptions::default()
-        .set_indexing_options(text_indexing)
-        .set_stored();
+    let text = TextOptions::default().set_indexing_options(text_indexing);
 
-    builder.add_u64_field("row_id", numeric.clone());
-    builder.add_text_field("owner_type", string.clone());
-    builder.add_text_field("owner_id", string.clone());
-    builder.add_text_field("topic_id", string.clone());
-    builder.add_text_field("msg_id", string.clone());
-    builder.add_u64_field("ordinal", STORED | INDEXED);
-    builder.add_i64_field("timestamp", FAST | INDEXED);
-    builder.add_text_field("role", string.clone());
+    builder.add_u64_field("row_id", STORED);
+    builder.add_text_field("owner_type", STRING);
+    builder.add_text_field("owner_id", STRING);
+    builder.add_text_field("topic_id", STRING);
     builder.add_text_field("speaker_name", text.clone());
     builder.add_text_field("content", text);
-    builder.add_text_field("message_hash", STRING);
+    builder.add_text_field("topic_marker", STRING);
     builder.build()
 }
 
@@ -548,7 +791,7 @@ fn exact_term_query(field: Field, value: &str) -> Box<dyn Query> {
 
 fn composite_topic_term(fields: &SearchFields, key: &TopicKey) -> Term {
     Term::from_field_text(
-        fields.message_hash,
+        fields.topic_marker,
         &composite_topic_value(key.owner_type, &key.owner_id, &key.topic_id),
     )
 }
@@ -607,7 +850,34 @@ fn normalize_query_syntax(query: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_query_syntax;
+    use super::{normalize_query_syntax, SearchRuntime};
+    use crate::storage::Database;
+
+    #[test]
+    fn search_runtime_stays_cold_until_search_capability_is_requested() {
+        let directory = tempfile::tempdir().expect("create lazy-search directory");
+        let database =
+            Database::open(&directory.path().join("chat.sqlite3")).expect("open database");
+        let index_dir = directory.path().join("search-index");
+        let runtime = SearchRuntime::new(index_dir.clone(), database);
+
+        assert!(!runtime.is_initialized());
+        assert!(!index_dir.exists());
+        assert_eq!(
+            runtime
+                .reconcile_revisions_if_initialized()
+                .expect("cold revision reconcile"),
+            0
+        );
+        assert!(!runtime.is_initialized());
+        assert!(!index_dir.exists());
+
+        runtime
+            .ensure_initialized()
+            .expect("initialize search capability");
+        assert!(runtime.is_initialized());
+        assert!(index_dir.join("meta.json").exists());
+    }
 
     #[test]
     fn converts_legacy_deepmemo_query_syntax() {

@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::Parser;
 
-pub const PROTOCOL_VERSION: u32 = 2;
-pub const SCHEMA_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "vcp-chat-data-service", version, about)]
@@ -43,7 +43,6 @@ pub struct ServiceConfig {
     pub agents_dir: PathBuf,
     pub groups_dir: PathBuf,
     pub user_data_dir: PathBuf,
-    pub database_dir: PathBuf,
     pub database_path: PathBuf,
     pub index_dir: PathBuf,
     pub lock_path: PathBuf,
@@ -83,7 +82,6 @@ impl ServiceConfig {
             database_path: database_dir.join("chat_data.sqlite3"),
             index_dir: database_dir.join("chat_search_index"),
             lock_path: database_dir.join("chat_data_service.lock"),
-            database_dir,
             app_data,
             host: cli.host,
             port: cli.port,

@@ -1324,11 +1324,36 @@ function extractSpeakableTextFromContentElement(contentElement) {
     if (!contentElement) return '';
 
     const contentClone = contentElement.cloneNode(true);
+
+    // data-vcp-block-type 是特殊协议渲染块的统一边界。保留显式类名作为
+    // 旧历史 DOM / 第三方渲染结果的兼容兜底；@tag 是路由提示而非正文，
+    // 无论后处理高亮是否已经完成，都不应进入 TTS。
     contentClone.querySelectorAll(
-        '.vcp-tool-use-bubble, .vcp-tool-result-bubble, .vcp-tool-call-summary-bubble, .vcp-flowlock-bubble, .maid-diary-bubble, .vcp-role-divider, .vcp-thought-chain-bubble, style, script'
+        '[data-vcp-block-type], .vcp-tool-use-bubble, .vcp-tool-result-bubble, .vcp-tool-call-summary-bubble, .vcp-flowlock-bubble, .maid-diary-bubble, .maid-diary-update-bubble, .vcp-role-divider, .vcp-thought-chain-bubble, .highlighted-tag, .highlighted-alert-tag, style, script'
     ).forEach(el => el.remove());
 
-    return (contentClone.innerText || '')
+    let speakableText = contentClone.innerText || contentClone.textContent || '';
+
+    // DOM 块删除是主路径；下面是协议文本残留的防御性兜底。工具请求扫描器
+    // 不依赖换行，支持“前文<<<[TOOL_REQUEST]>>>tool_name...结束标记后文”。
+    // 因此即使 Markdown 没有生成独立气泡，也不会把完整工具载荷送入 TTS。
+    speakableText = replaceToolRequestBlocks(speakableText, () => '');
+    speakableText = speakableText
+        .replace(TOOL_RESULT_REGEX, '')
+        .replace(TOOL_CALL_SUMMARY_REGEX, '')
+        .replace(ROLE_DIVIDER_REGEX, '');
+
+    // 上述正则是带 global 状态的共享常量，显式复位，避免后续渲染调用受影响。
+    TOOL_RESULT_REGEX.lastIndex = 0;
+    TOOL_CALL_SUMMARY_REGEX.lastIndex = 0;
+    ROLE_DIVIDER_REGEX.lastIndex = 0;
+
+    return speakableText
+        // 提取可能早于异步 @tag 高亮完成，因此还需清理纯文本形式。
+        // 与前端高亮语法保持一致，支持 @name 和 @!name。
+        .replace(/@!?[\u4e00-\u9fa5A-Za-z0-9_]+/g, '')
+        .replace(/[ \t]+\n/g, '\n')
+        .replace(/[ \t]{2,}/g, ' ')
         .replace(/\n{3,}/g, '\n\n')
         .trim();
 }
@@ -1515,12 +1540,16 @@ function processAssistantScopedHtmlContent(content, scopeId, messageItem = null,
     );
 
     // 恢复所有被保护的块。
-    // 🟢 使用 split/join，避免代码块中的 $ 字符（如 $'、$$、$&）被 String.replace() 误解释为特殊替换模式。
+    // 保护域允许嵌套：例如 fenced HTML 中的注释会先被保护，随后包含该
+    // 注释占位符的整个代码围栏又被保护。必须按 LIFO 逆序恢复，先展开
+    // 外层围栏，再恢复其中的注释；正序恢复会让内部占位符永久泄漏。
+    // 使用 split/join，避免代码块中的 $ 字符（如 $'、$$、$&）被
+    // String.replace() 误解释为特殊替换模式。
     let restoredContent = contentWithoutStyles;
-    protectedBlocks.forEach((block, i) => {
+    for (let i = protectedBlocks.length - 1; i >= 0; i--) {
         const placeholder = `__VCP_STYLE_PROTECT_${i}__`;
-        restoredContent = restoredContent.split(placeholder).join(block);
-    });
+        restoredContent = restoredContent.split(placeholder).join(protectedBlocks[i]);
+    }
 
     return restoredContent;
 }
@@ -2452,6 +2481,7 @@ function removeMessageById(messageId, saveHistory = false, root = mainRendererRe
 
 function clearChat(root = mainRendererReferences.chatMessagesDiv) {
     invalidateRenderSession(root);
+    mainRendererReferences.uiHelper.resetChatScrollFollow?.();
 
     // 清空聊天通常意味着用户希望释放当前渲染上下文占用；HTML 字符串缓存不持有 DOM，但这里主动释放更保守。
     clearRenderHtmlCache();
@@ -2575,11 +2605,17 @@ function initializeMessageRenderer(refs) {
             return;
         }
 
-        // 4. Avatar 点击停止 TTS（也使用委托）
-        const avatar = e.target.closest('.message-avatar');
+        // 4. Avatar 点击停止 TTS（也使用委托）。
+        // createMessageSkeleton 当前使用 .chat-avatar；保留 .message-avatar
+        // 兼容旧 DOM，避免出现头像动画正常但点击无法停止的情况。
+        const avatar = e.target.closest('.chat-avatar, .message-avatar');
         if (avatar) {
             const messageItem = avatar.closest('.message-item');
-            if (messageItem?.dataset.role === 'assistant') {
+            if (
+                messageItem?.dataset.role === 'assistant'
+                || messageItem?.classList.contains('assistant')
+                || messageItem?.classList.contains('agent')
+            ) {
                 mainRendererReferences.electronAPI.sovitsStop();
             }
         }
@@ -2638,6 +2674,7 @@ function initializeMessageRenderer(refs) {
     if (features.contextMenu) contextMenu.initializeContextMenu(mainRendererReferences, {
         removeMessageById: removeMessageById,
         renderMessage: renderMessage,
+        startStreamingMessage: streamManager.startStreamingMessage,
         discardStreamingMessage: streamManager.discardStreamingMessage,
         setContentAndProcessImages: imageHandler.setContentAndProcessImages,
         processRenderedContent: wrappedProcessRenderedContent,
@@ -2704,6 +2741,7 @@ function initializeMessageRenderer(refs) {
         handleRegenerateResponse: contextMenu.handleRegenerateResponse,
         showForwardModal: mainRendererReferences.showForwardModal,
         ensureAudioContext: mainRendererReferences.ensureAudioContext,
+        extractSpeakableTextFromContentElement,
     });
 
     // --- 用户气泡文件拖拽支持 ---
@@ -3328,11 +3366,12 @@ async function renderMessage(message, isInitialLoad = false, appendToDom = true,
     const currentSelectedItem = mainRendererReferences.currentSelectedItemRef.get();
     const currentChatHistory = mainRendererReferences.currentChatHistoryRef.get();
 
-    // Prevent re-rendering if the message already exists in the DOM, unless it's a thinking message being replaced.
+    // 同一个 Surface 内，message id 是外层气泡的唯一身份。历史批次、活动流补建
+    // 和文件同步可能并发请求渲染；默认复用已挂载节点，禁止生成第二个气泡。
+    // 只有显式的离屏 UI 替换流程可以请求创建新节点。
     const existingMessageDom = renderRoot.querySelector(`.message-item[data-message-id="${message.id}"]`);
-    if (existingMessageDom && !existingMessageDom.classList.contains('thinking')) {
-        // console.log(`[MessageRenderer] Message ${message.id} already in DOM. Skipping render.`);
-        // return existingMessageDom;
+    if (existingMessageDom && renderContext.replaceExisting !== true) {
+        return existingMessageDom;
     }
 
     if (!chatMessagesDiv || !electronAPI || !markedInstance) {
@@ -3715,7 +3754,13 @@ async function renderMessage(message, isInitialLoad = false, appendToDom = true,
     // Highlighting is now part of processRenderedContent
 
     if (appendToDom) {
-        mainRendererReferences.uiHelper.scrollToBottom();
+        // 主动发送用户消息代表一次明确的“回到底部继续对话”意图。
+        // 强制请求仍受滚动代际保护：若用户在下一帧执行前立即上滚，
+        // uiHelper 会取消该请求，不会把用户重新拉回底部。
+        const shouldReengageBottomFollow = message.role === 'user' && !isInitialLoad;
+        mainRendererReferences.uiHelper.scrollToBottom({
+            force: shouldReengageBottomFollow
+        });
     }
     return messageItem;
 }
@@ -3983,6 +4028,7 @@ function prepareUserMessageText(text) {
  */
 async function renderHistory(history, options = {}) {
     const renderSessionId = invalidateRenderSession(options.root || mainRendererReferences.chatMessagesDiv);
+    mainRendererReferences.uiHelper.resetChatScrollFollow?.();
 
     const {
         initialBatch = 5,
@@ -4093,6 +4139,17 @@ async function renderMessageBatch(messages, scrollToBottom = false, renderSessio
     return renderTaskOwner.animationFrame(renderRoot, () => {
             if (!isRenderSessionActive(renderSessionId)) return;
 
+            // 在异步批次构建期间，活动流恢复可能已经挂载了相同 message id。
+            // 不能只删除 fragment 中的历史快照，否则实时节点会留在旧位置并被
+            // 随后追加的历史消息压到顶部。把实时节点移动到快照槽位，才能同时
+            // 保持唯一身份和 history 数组定义的最终楼层。
+            messageElements.forEach(el => {
+                const messageId = el.dataset?.messageId;
+                if (!messageId) return;
+                const mounted = renderRoot.querySelector(`.message-item[data-message-id="${messageId}"]`);
+                if (mounted && mounted !== el) el.replaceWith(mounted);
+            });
+
             // Step 1: Append all elements to the DOM at once.
             renderRoot.appendChild(fragment);
             mainRendererReferences.messageCommands.syncNextUiEmptyStateWithMessages?.();
@@ -4145,6 +4202,15 @@ async function renderOlderMessagesInBatches(olderMessages, batchSize, batchDelay
         // 🟢 owner-managed idle work，当前 root revoke/dispose 时会被取消。
         await renderTaskOwner.idle(renderRoot, () => {
                 if (!isRenderSessionActive(renderSessionId)) return;
+
+                // idle 等待期间流式恢复可能已建立同 ID 节点。用实时节点替换
+                // fragment 中的快照槽位，使节点随该批次进入准确的历史位置。
+                elementsForProcessing.forEach(el => {
+                    const messageId = el.dataset?.messageId;
+                    if (!messageId) return;
+                    const mounted = renderRoot.querySelector(`.message-item[data-message-id="${messageId}"]`);
+                    if (mounted && mounted !== el) el.replaceWith(mounted);
+                });
 
                 let insertPoint = renderRoot.firstChild;
                 while (insertPoint?.classList?.contains('topic-timestamp-bubble')) {
@@ -4205,6 +4271,15 @@ async function renderHistoryLegacy(history, renderSessionId = null, renderContex
 
     return renderTaskOwner.animationFrame(renderRoot, () => {
             if (!isRenderSessionActive(renderSessionId)) return;
+
+            // 构建 fragment 后到本帧挂载前，活动流补建可能已经恢复同 ID 节点。
+            // 将实时节点移入对应快照槽位，避免它停留在历史队列顶部。
+            allMessageElements.forEach(el => {
+                const messageId = el.dataset?.messageId;
+                if (!messageId) return;
+                const mounted = renderRoot.querySelector(`.message-item[data-message-id="${messageId}"]`);
+                if (mounted && mounted !== el) el.replaceWith(mounted);
+            });
 
             // Step 1: Append all elements to the DOM.
             renderRoot.appendChild(fragment);
@@ -4271,7 +4346,13 @@ const messageRenderer = {
     updateMessageUI: async (messageId, updatedMessage, root = mainRendererReferences.chatMessagesDiv) => {
         const existingMessageDom = root?.querySelector?.(`.message-item[data-message-id="${messageId}"]`);
         if (!existingMessageDom) return;
-        const newMessageDom = await renderMessage(updatedMessage, true, false);
+        const newMessageDom = await renderMessage(
+            updatedMessage,
+            true,
+            false,
+            null,
+            { root, replaceExisting: true }
+        );
         if (newMessageDom) {
             cleanupMessageDomResources(existingMessageDom, messageId);
             existingMessageDom.replaceWith(newMessageDom);
