@@ -134,6 +134,7 @@ function createCatalog(ops) {
         loadTranslatorSettings: query(() => ops.invoke('load-translator-settings')),
         saveTranslatorSettings: query((settings) => ops.invoke('save-translator-settings', settings)),
         saveSettings: query((settings) => ops.invoke('save-settings', settings)),
+        onSettingsExternalUpdated: subscription(ops.subscribe('settings-external-updated', (_event, payload) => payload)),
         saveUserAvatar: query((avatarData) => ops.invoke('save-user-avatar', avatarData)),
         saveAvatarColor: query((data) => ops.invoke('save-avatar-color', data)),
         readImageFromClipboard: query(async () => {
@@ -199,7 +200,7 @@ function createCatalog(ops) {
         openLogWindow: command(() => ops.send('open-log-window')),
         openMusicWindow: command(() => ops.send('open-music-window')),
         openDiceWindow: query(() => ops.invoke('open-dice-window')),
-        openCanvasWindow: query(() => ops.invoke('open-canvas-window')),
+        openCanvasWindow: query((request = null) => ops.invoke('open-canvas-window', request)),
         openDesktopWindow: query(() => ops.invoke('open-desktop-window')),
 
         // Chat/app shell APIs
