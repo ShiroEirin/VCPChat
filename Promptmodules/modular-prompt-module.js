@@ -185,13 +185,17 @@ class ModularPromptModule {
 
         // View 模式开关
         const viewModeToggle = document.createElement('label');
-        viewModeToggle.className = 'toolbar-toggle';
+        viewModeToggle.className = `toolbar-toggle${this.viewMode ? ' active' : ''}`;
         viewModeToggle.title = '切换预览模式';
         viewModeToggle.innerHTML = `
             <input type="checkbox" ${this.viewMode ? 'checked' : ''} id="viewModeCheckbox">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>
             <span>预览</span>
         `;
-        viewModeToggle.querySelector('input').onchange = (e) => this.toggleViewMode(e.target.checked);
+        viewModeToggle.querySelector('input').onchange = (e) => {
+            viewModeToggle.classList.toggle('active', e.target.checked);
+            this.toggleViewMode(e.target.checked);
+        };
         toolbar.appendChild(viewModeToggle);
 
         return toolbar;
@@ -253,6 +257,9 @@ class ModularPromptModule {
             // 内容编辑区
             const contentEl = document.createElement('div');
             contentEl.className = 'block-content';
+            contentEl.spellcheck = false;
+            contentEl.setAttribute('autocorrect', 'off');
+            contentEl.setAttribute('autocapitalize', 'off');
             contentEl.contentEditable = false; // 默认不可编辑
             // 如果有自定义名称，显示名称；否则显示内容
             const displayText = block.name && block.name.trim() ? block.name : currentContent;
@@ -475,7 +482,7 @@ class ModularPromptModule {
         block.variants.forEach((variant, idx) => {
             dialogHTML += `
                         <div class="variant-item-edit" data-index="${idx}">
-                            <textarea class="variant-content-input" rows="3" placeholder="内容条目 ${idx + 1}">${variant}</textarea>
+                            <textarea class="variant-content-input" rows="3" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="内容条目 ${idx + 1}">${variant}</textarea>
                             ${block.variants.length > 1 ? `<button class="remove-variant-btn" data-index="${idx}">×</button>` : ''}
                         </div>`;
         });
@@ -507,7 +514,7 @@ class ModularPromptModule {
             variantItem.className = 'variant-item-edit';
             variantItem.dataset.index = newIndex;
             variantItem.innerHTML = `
-                <textarea class="variant-content-input" rows="3" placeholder="内容条目 ${newIndex + 1}"></textarea>
+                <textarea class="variant-content-input" rows="3" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="内容条目 ${newIndex + 1}"></textarea>
                 <button class="remove-variant-btn" data-index="${newIndex}">×</button>
             `;
             variantsList.appendChild(variantItem);
@@ -661,22 +668,7 @@ class ModularPromptModule {
     renderWarehouse() {
         this.warehouseContainer.innerHTML = '';
 
-        const header = document.createElement('div');
-        header.className = 'warehouse-header';
-        header.innerHTML = '<span class="warehouse-title">积木块小仓</span>';
-        
-        // 添加新建仓库按钮
-        const addWarehouseBtn = document.createElement('button');
-        addWarehouseBtn.type = 'button';
-        addWarehouseBtn.className = 'add-warehouse-btn';
-        addWarehouseBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg><span>新建小仓</span>';
-        addWarehouseBtn.title = '新建仓库';
-        addWarehouseBtn.onclick = () => this.createWarehouse();
-        header.appendChild(addWarehouseBtn);
-        
-        this.warehouseContainer.appendChild(header);
-
-        // 仓库选择
+        // 仓库选择与新建
         const warehouseSelector = document.createElement('div');
         warehouseSelector.className = 'warehouse-selector';
         
@@ -728,6 +720,16 @@ class ModularPromptModule {
             
             warehouseSelector.appendChild(warehouseItem);
         });
+
+        // 添加新建仓库圆形按钮（加号圆形图标，与仓库 pill 并列）
+        const addWarehouseBtn = document.createElement('button');
+        addWarehouseBtn.type = 'button';
+        addWarehouseBtn.className = 'add-warehouse-btn';
+        addWarehouseBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>';
+        addWarehouseBtn.title = '新建仓库';
+        addWarehouseBtn.setAttribute('aria-label', '新建仓库');
+        addWarehouseBtn.onclick = () => this.createWarehouse();
+        warehouseSelector.appendChild(addWarehouseBtn);
 
         this.warehouseContainer.appendChild(warehouseSelector);
 
@@ -940,7 +942,7 @@ class ModularPromptModule {
         block.variants.forEach((variant, idx) => {
             dialogHTML += `
                         <div class="variant-item-edit" data-index="${idx}">
-                            <textarea class="variant-content-input" rows="3" placeholder="内容条目 ${idx + 1}">${variant}</textarea>
+                            <textarea class="variant-content-input" rows="3" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="内容条目 ${idx + 1}">${variant}</textarea>
                             ${block.variants.length > 1 ? `<button class="remove-variant-btn" data-index="${idx}">×</button>` : ''}
                         </div>`;
         });
@@ -972,7 +974,7 @@ class ModularPromptModule {
             variantItem.className = 'variant-item-edit';
             variantItem.dataset.index = newIndex;
             variantItem.innerHTML = `
-                <textarea class="variant-content-input" rows="3" placeholder="内容条目 ${newIndex + 1}"></textarea>
+                <textarea class="variant-content-input" rows="3" spellcheck="false" autocorrect="off" autocapitalize="off" placeholder="内容条目 ${newIndex + 1}"></textarea>
                 <button class="remove-variant-btn" data-index="${newIndex}">×</button>
             `;
             variantsList.appendChild(variantItem);

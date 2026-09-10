@@ -241,11 +241,24 @@ class PresetPromptModule {
         section.className = 'preset-editor-section';
 
         const label = document.createElement('label');
-        label.textContent = '系统提示词 (可使用 {{AgentName}} 占位符):';
+        label.className = 'preset-section-label';
+        label.textContent = '系统提示词:';
+        const badge = document.createElement('button');
+        badge.type = 'button';
+        badge.className = 'vcp-settings-info-badge';
+        badge.title = '可使用 {{AgentName}} 占位符，将在对话中自动替换为当前助手名称';
+        badge.setAttribute('data-tooltip', '可使用 {{AgentName}} 占位符，将在对话中自动替换为当前助手名称');
+        badge.setAttribute('aria-label', '占位符说明');
+        badge.textContent = '?';
+        badge.onclick = (e) => { e.preventDefault(); e.stopPropagation(); };
+        label.appendChild(badge);
         section.appendChild(label);
 
         this.textarea = document.createElement('textarea');
         this.textarea.className = 'prompt-textarea preset-prompt-textarea';
+        this.textarea.spellcheck = false;
+        this.textarea.autocorrect = 'off';
+        this.textarea.autocapitalize = 'off';
         this.textarea.placeholder = '请输入系统提示词或选择预设...';
         this.textarea.value = this.cachedContent;
         this.textarea.rows = 3;
