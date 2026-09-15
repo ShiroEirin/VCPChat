@@ -47,6 +47,7 @@
     <script src="modules/ui-system/material-runtime.js"></script>
     <script src="modules/ui-system/settlement.js"></script>
     <script src="modules/services/windowStateService.js"></script>
+    <script src="modules/ui-system/settings/group-slots.js"></script>
     <script src="modules/ui-system/surface-controller.js"></script>
     <script src="modules/ui-system/lifecycle-inspector.js"></script>
     <script src="modules/ui-system/appearance-engine.js"></script>
@@ -61,6 +62,8 @@
     <script src="vendor/anime.min.js"></script>
     <script src="vendor/mermaid.min.js"></script>
     <script src="vendor/three.min.js"></script> <!-- 全局引入 three.js -->
+    <script src="vendor/pixi.min.js"></script> <!-- 全局引入 Pixi.js，供消息动画岛与音乐舞台复用 -->
+    <script src="vendor/pixi-unsafe-eval.min.js"></script> <!-- Pixi 官方 CSP polyfill：以无 eval 实现替换动态编译路径 -->
     <script src="vendor/morphdom.min.js"></script>
 </head>
 
@@ -1364,7 +1367,6 @@
     <script src="vendor/Sortable.min.js"></script>
     <script src="modules/tavernRulesEngine.js"></script>
     <script src="Tavernmodules/tavern-manager.js"></script>
-    <script src="modules/ui-system/settings/group-slots.js"></script>
     <script src="Groupmodules/grouprenderer.js"></script>
     <script type="module" src="modules/renderer/colorUtils.js"></script>
     <script type="module" src="modules/renderer/imageHandler.js"></script>
