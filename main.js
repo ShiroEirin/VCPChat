@@ -77,10 +77,12 @@ const translatorHandlers = require('./modules/ipc/translatorHandlers'); // Impor
 const voiceHandlers = require('./modules/ipc/voiceHandlers'); // Import voice chat handlers
 // speechRecognizer is now lazy-loaded
 const canvasHandlers = require('./modules/ipc/canvasHandlers'); // Import canvas handlers
+const chartHandlers = require('./modules/ipc/chartHandlers'); // Agent 图表工作台与持久化服务
 const desktopHandlers = require('./modules/ipc/desktopHandlers'); // Import VCPdesktop handlers
 const desktopRemoteHandlers = require('./modules/ipc/desktopRemoteHandlers'); // Import desktop remote control handlers
 const tavernHandlers = require('./modules/ipc/tavernHandlers'); // Import VCPChatTarven (advanced reply) handlers
 const { ScriptoriumAgentControlService } = require('./modules/services/scriptoriumAgentControlService');
+const { GlobalJevService } = require('./modules/services/globalJevService');
 // docxHandlers 体积较大，在主窗口开始加载后异步预热；首次调用也会按需等待同一加载任务。
 let docxHandlersModule = null;
 let docxHandlersLoadPromise = null;
@@ -291,7 +293,9 @@ let distributedServerStartPromise = null;
 let chatDataService = null; // Optional VCP-CDS shadow service.
 let historyMutationQueue = null;
 let pluginAgentOperationService = null;
+let chartService = null;
 let appSettingsManager = null;
+let globalJevService = null;
 let loomManager = null;
 let scriptoriumAgentControl = null;
 let networkNotesTreeCache = null; // In-memory cache for the network notes
@@ -488,7 +492,8 @@ function startDistributedServerAfterRenderer() {
                 chatDataService,
                 loomManager,
                 scriptoriumAgentControl,
-                pluginAgentOperationService
+                pluginAgentOperationService,
+                chartService
             });
             distributedServer = server;
             await server.initialize();
@@ -689,6 +694,13 @@ async function performQuitCleanup() {
         await historyMutationQueue?.dispose?.();
         historyMutationQueue = null;
         pluginAgentOperationService = null;
+        if (chartService) {
+            try {
+                await chartHandlers.shutdown();
+            } finally {
+                chartService = null;
+            }
+        }
         await stopAudioEngine();
     })();
 
@@ -1076,6 +1088,13 @@ if (!gotTheLock) {
         const AppSettingsManager = require('./modules/utils/appSettingsManager');
         const AgentConfigManager = require('./modules/utils/agentConfigManager');
         appSettingsManager = new AppSettingsManager(SETTINGS_FILE);
+        globalJevService = new GlobalJevService({
+            settingsManager: appSettingsManager,
+            logger: console
+        });
+        // 主进程内的升级功能可直接复用此单例；实际配置在每次调用时从
+        // settings.json 读取，因此全局设置保存后无需重启应用。
+        globalThis.vcpJev = globalJevService;
         const agentConfigManager = new AgentConfigManager(AGENT_DIR);
         historyMutationQueue = new HistoryMutationQueue({
             userDataDir: USER_DATA_DIR,
@@ -1120,6 +1139,40 @@ if (!gotTheLock) {
         agentConfigManager.startCleanupTimer(); // Start agent config cleanup
 
         settingsHandlers.initialize({ SETTINGS_FILE, USER_AVATAR_FILE, AGENT_DIR, settingsManager: appSettingsManager, agentConfigManager, mainWindow }); // Initialize settings handlers
+        for (const channel of ['jev:get-status', 'jev:decide']) {
+            ipcMain.removeHandler(channel);
+        }
+        ipcMain.handle('jev:get-status', async () => {
+            try {
+                return { success: true, status: await globalJevService.getStatus() };
+            } catch (error) {
+                console.error('[Jev] Failed to resolve global status:', error);
+                return {
+                    success: false,
+                    error: error?.message || String(error),
+                    code: error?.code || 'JEV_STATUS_FAILED'
+                };
+            }
+        });
+        ipcMain.handle('jev:decide', async (_event, payload = {}) => {
+            try {
+                const result = await globalJevService.decide(
+                    payload.state,
+                    payload.questions
+                );
+                return { success: true, result };
+            } catch (error) {
+                console.error('[Jev] Global decision failed:', error);
+                return {
+                    success: false,
+                    error: error?.message || String(error),
+                    code: error?.code || 'JEV_REQUEST_FAILED',
+                    status: error?.status ?? null,
+                    retryable: error?.retryable === true,
+                    provider: error?.provider || null
+                };
+            }
+        });
         ragHandlers.initialize({ mainWindow, openChildWindows, settingsManager: appSettingsManager, SETTINGS_FILE });
 
         // RAG 独立模式：不创建主窗口，仅初始化 RAG 所需 IPC 并直接打开 RAG 窗口
@@ -1430,7 +1483,8 @@ if (!gotTheLock) {
             stopSelectionListener: assistantHandlers.stopSelectionListener,
             startSelectionListener: assistantHandlers.startSelectionListener,
             fileWatcher, // Inject fileWatcher here as well
-            historyMutationQueue
+            historyMutationQueue,
+            jevService: globalJevService
         });
         regexHandlers.initialize({ AGENT_DIR });
         chatHandlers.initialize(mainWindow, {
@@ -1513,6 +1567,13 @@ if (!gotTheLock) {
         emoticonHandlers.initialize({ SETTINGS_FILE, APP_DATA_ROOT_IN_PROJECT });
         emoticonHandlers.setupEmoticonHandlers();
         canvasHandlers.initialize({ mainWindow, openChildWindows, CANVAS_CACHE_DIR });
+        chartService = await chartHandlers.initialize({
+            projectRoot: PROJECT_ROOT,
+            appDataRoot: APP_DATA_ROOT_IN_PROJECT,
+            mainWindow,
+            openChildWindows,
+            logger: console,
+        });
         configureDocxHandlers({
             mainWindow,
             openChildWindows,
