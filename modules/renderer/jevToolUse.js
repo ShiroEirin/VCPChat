@@ -5,7 +5,8 @@
  * plugin fields and does not replace the existing tool_name rendering path.
  *
  * Display priority:
- * 1. Explicit tool name enclosed in single quotes, for example 'GPT生图'
+ * 1. Explicit tool name enclosed in quotes or backticks, for example
+ *    'GPT生图' or `GPT生图`
  * 2. Capability enclosed in braces, for example {联网搜索}
  *
  * @param {string} value Raw value inside JEV:「始」...「末」
@@ -20,11 +21,16 @@ function parseJevToolUse(value) {
     if (typeof value !== 'string' || !value.trim()) return null;
 
     const raw = value.trim();
-    const capability = (raw.match(/\{([^{}\r\n]+)\}/u)?.[1] || '').trim();
+    // 工具请求在进入展示转换前会经过字段内容 HTML 转义，ASCII 单引号通常
+    // 已成为 &#039;（也兼容 ' / '）。仅规范化引号实体用于语法识别，
+    // 原始 raw 仍保持原值，避免在此模块承担通用 HTML 解码职责。
+    const parseSource = raw.replace(/(?:&#0*39;|')/gi, "'");
+    const capability = (parseSource.match(/\{([^{}\r\n]+)\}/u)?.[1] || '').trim();
     const explicitToolName = (
-        raw.match(/'([^'\r\n]+)'/u)?.[1]
-        || raw.match(/‘([^’\r\n]+)’/u)?.[1]
-        || raw.match(/“([^”\r\n]+)”/u)?.[1]
+        parseSource.match(/'([^'\r\n]+)'/u)?.[1]
+        || parseSource.match(/`([^`\r\n]+)`/u)?.[1]
+        || parseSource.match(/‘([^’\r\n]+)’/u)?.[1]
+        || parseSource.match(/“([^”\r\n]+)”/u)?.[1]
         || ''
     ).trim();
 
