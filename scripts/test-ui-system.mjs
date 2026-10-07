@@ -606,6 +606,25 @@ const behaviorWindowControls = VCPUI.create('WindowControls', {
 });
 assert.equal(behaviorWindowControls.element.querySelectorAll('.vcp-ui-window-control-button').length, 3,
     'WindowControls must mark every clickable host as a no-drag control');
+
+// 验证同步 canPin 门禁契约与零 CLS 抖动行为：
+// 1. 当 canPin() 为 true 时，构造即具备 4 个按钮，0 延迟、0 抖动
+window.utilityAPI.canPin = () => true;
+window.utilityAPI.togglePinWindow = async () => true;
+const pinCapableControls = VCPUI.create('WindowControls');
+assert.equal(pinCapableControls.element.querySelectorAll('.vcp-ui-window-control-button').length, 4,
+    'Windows pin-capable WindowControls must mount pin button synchronously on first frame (0 CLS)');
+assert.ok(pinCapableControls.element.querySelector('.vcp-ui-window-control-pin'),
+    'pin button must be present when canPin is true');
+
+// 2. 当 canPin() 为 false（非 Win32 或嵌入式标签页）时，首帧同步仅挂载 3 个按钮，绝对不出现置顶
+window.utilityAPI.canPin = () => false;
+const nonPinControls = VCPUI.create('WindowControls');
+assert.equal(nonPinControls.element.querySelectorAll('.vcp-ui-window-control-button').length, 3,
+    'Non-pin WindowControls must mount exactly 3 buttons with 0 DOM residue');
+assert.equal(nonPinControls.element.querySelector('.vcp-ui-window-control-pin'), null,
+    'pin button must be absent when canPin is false');
+delete window.utilityAPI.canPin;
 const uiComponentsCss = fs.readFileSync(new URL('../styles/ui-system/components.css', import.meta.url), 'utf8');
 const nextUiCss = fs.readFileSync(new URL('../styles/ui-next.css', import.meta.url), 'utf8');
 const notificationSystemCss = fs.readFileSync(new URL('../styles/ui-system/notifications.css', import.meta.url), 'utf8');
@@ -759,7 +778,7 @@ assert.match(mainHtml,
     /id="nextUiMainPanel"[^>]*>[\s\S]*<main class="main-content">[\s\S]*id="resizerRight"[\s\S]*id="notificationsSidebar"[\s\S]*<\/section>/s,
     'main chat, notification resizer, and notification sidebar must share one clipping host');
 assert.match(nextUiCss,
-    /html \.next-ui-main-panel\s*\{[^}]*overflow:\s*hidden;[^}]*isolation:\s*isolate;[^}]*border-radius:\s*var\(--vcp-ui-shell-radius\) 0 0 0;[^}]*var\(--next-wallpaper\);/s,
+    /html \.next-ui-main-panel\s*\{[^}]*overflow:\s*hidden;[^}]*isolation:\s*isolate;[^}]*border-radius:\s*var\(--vcp-ui-shell-radius\);[^}]*var\(--next-wallpaper\);/s,
     'the shared host must own both the panel radius and the theme wallpaper clip');
 assert.match(nextUiCss,
     /html \.main-content\s*\{[^}]*background:\s*transparent;/s,

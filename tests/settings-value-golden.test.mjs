@@ -26,11 +26,15 @@ function legacyCollect({ doc, currentSettings, settingsManager, getAppearance, n
     const networkNotesPaths = Array.from(pathInputs).map(input => input.value.trim()).filter(path => path);
 
     const voiceMode = getElementById('voiceModeNetwork')?.checked ? 'network' : 'local';
-    const allowedVoiceInputModes = new Set(['windows_voice_typing', 'right_alt_hold']);
+    const allowedVoiceInputModes = new Set(['windows_voice_typing', 'right_alt_hold', 'local_sensevoice']);
     const selectedVoiceInputMode = getElementById('voiceInputMode')?.value;
     const voiceInputMode = allowedVoiceInputModes.has(selectedVoiceInputMode)
         ? selectedVoiceInputMode
         : 'windows_voice_typing';
+    const selectedLocalSttLanguage = getElementById('localSttLanguage')?.value;
+    const localSttLanguage = ['auto', 'zh', 'en', 'yue', 'ja', 'ko'].includes(selectedLocalSttLanguage)
+        ? selectedLocalSttLanguage
+        : 'auto';
     const voiceInputShortcut = (
         getElementById('voiceInputShortcut')?.value.trim()
         || 'F7'
@@ -45,6 +49,15 @@ function legacyCollect({ doc, currentSettings, settingsManager, getAppearance, n
         ? Math.min(2000, Math.max(100, Math.round(rawStreamAnimationDurationMs / 50) * 50))
         : 500;
     const streamAnimationCustomCss = (getElementById('streamAnimationCustomCss')?.value || '').slice(0, 4000);
+
+    const rawInitialIdle = Number(getElementById('mainChatVoiceInitialIdleTimeout')?.value);
+    const mainChatVoiceInitialIdleTimeout = Number.isFinite(rawInitialIdle)
+        ? Math.min(12, Math.max(1, rawInitialIdle))
+        : 5.5;
+    const rawQuiet = Number(getElementById('mainChatVoiceQuietTimeout')?.value);
+    const mainChatVoiceQuietTimeout = Number.isFinite(rawQuiet)
+        ? Math.min(15, Math.max(0.5, rawQuiet))
+        : 2.5;
 
     const newSettings = {
         userName: getElementById('userName').value.trim() || '用户',
@@ -136,6 +149,7 @@ function legacyCollect({ doc, currentSettings, settingsManager, getAppearance, n
         ),
         enableUserChatBubbleUi: getElementById('enableUserChatBubbleUi')?.checked !== false,
         showUserMetaInChatBubbleUi: getElementById('showUserMetaInChatBubbleUi')?.checked !== false,
+        enableTurnNavigator: getElementById('enableTurnNavigator')?.checked !== false,
         chatBubbleMaxWidthDefault: clampBubbleWidthPercent(currentSettings.chatBubbleMaxWidthDefault, 82),
         chatBubbleMaxWidthNotifications: clampBubbleWidthPercent(currentSettings.chatBubbleMaxWidthNotifications, 90),
         chatBubbleMaxWidthNarrow: clampBubbleWidthPercent(currentSettings.chatBubbleMaxWidthNarrow, 85),
@@ -150,7 +164,12 @@ function legacyCollect({ doc, currentSettings, settingsManager, getAppearance, n
         assistantAgent: getElementById('assistantAgent').value,
         voiceMode,
         voiceInputMode,
+        localSttLanguage,
         voiceInputShortcut,
+        mainChatVoiceInitialIdleTimeout,
+        mainChatVoiceQuietTimeout,
+        mainChatVoiceClearPhrase: getElementById('mainChatVoiceClearPhrase')?.value.trim() || '',
+        mainChatVoiceSendPhrase: getElementById('mainChatVoiceSendPhrase')?.value.trim() || '',
         voiceLocalSettings: {
             sovitsUrl: getElementById('voiceLocalSovitsUrl')?.value.trim() || '',
             sovitsKey: getElementById('voiceLocalSovitsKey')?.value || ''

@@ -744,7 +744,11 @@ function toggleEditMode(messageItem, message) {
         messageItem.appendChild(controlsDiv);
 
         if (uiHelper.autoResizeTextarea) uiHelper.autoResizeTextarea(textarea);
-        textarea.focus();
+        try {
+            textarea.focus({ preventScroll: true });
+        } catch {
+            textarea.focus();
+        }
         textarea.addEventListener('input', () => uiHelper.autoResizeTextarea(textarea));
         textarea.addEventListener('keydown', (event) => {
             if (event.key === 'Escape') {
@@ -758,6 +762,16 @@ function toggleEditMode(messageItem, message) {
             }
         });
     }
+}
+
+// 实时引用上下文标签（与 singleChatRequestOrchestrator.describeLiveReference 同构）。
+function describeLiveReferenceForContext(data) {
+    const ref = data?.workspaceRef;
+    if (data?.liveSource === 'workspace' || ref) {
+        const location = ref?.alias && ref?.relPath ? ` ${ref.alias}: ${ref.relPath}` : '';
+        return `工作区${location}，实时文件，可直接修改`;
+    }
+    return '笔记区实时文件，可直接修改';
 }
 
 function attachTimestampMetaToVcpMessage(vcpMessage, historyMessage) {
@@ -943,8 +957,17 @@ async function handleRegenerateResponse(originalAssistantMessage) {
                         }
                     }
 
-                    if (effectiveImageFrames && effectiveImageFrames.length > 0) {
-                         historicalAppendedText += `\n\n[附加文件: ${filePathForContext} (扫描版PDF，已转换为图片)]`;
+                    const isLiveReference = fileManagerData.isLiveReference === true || att.isLiveReference === true;
+                    if (isLiveReference) {
+                        // 与单聊主路径一致：实时引用始终带来源标签，告知 AI 可直接修改真实文件。
+                        const liveLabel = describeLiveReferenceForContext({ ...att, ...fileManagerData });
+                        historicalAppendedText += `\n\n[附加文件: ${filePathForContext} (${liveLabel})]\n${effectiveExtractedText || ''}\n[/附加文件结束: ${att.name || '未知文件'}]`;
+                    } else if (effectiveImageFrames && effectiveImageFrames.length > 0) {
+                        const totalPages = fileManagerData?.pdfMeta?.totalPages;
+                        const pageHint = totalPages
+                            ? `(扫描版/图像型PDF，已内联 ${effectiveImageFrames.length} 页高清多模态图像/共 ${totalPages} 页)`
+                            : `(扫描版/图像型PDF，已提供 ${effectiveImageFrames.length} 页多模态图像)`;
+                        historicalAppendedText += `\n\n[附加文件: ${filePathForContext} ${pageHint}]\n${effectiveExtractedText || ''}`;
                     } else if (effectiveExtractedText) {
                         historicalAppendedText += `\n\n[附加文件: ${filePathForContext}]\n${effectiveExtractedText}\n[/附加文件结束: ${att.name || '未知文件'}]`;
                     } else {

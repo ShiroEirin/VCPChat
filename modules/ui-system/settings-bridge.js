@@ -222,6 +222,7 @@ const GLOBAL_CATEGORY_ICONS = Object.freeze({
     'selection-assistant': 'mouse-pointer-click',
     'voice-settings': 'mic',
     'advanced-features': 'layers',
+    'workspace-management': 'folder-git-2',
     'quick-actions': 'zap',
 });
 
@@ -496,6 +497,7 @@ function bindIdentityNameEditor(form) {
         }, 'identity-name-cancel');
     }
     listenIdentity(nameInput, 'input', syncName, 'identity-name-input');
+    listenIdentity(nameInput, 'vcp-uiux-sync', syncName, 'identity-name-sync');
     listenIdentity(nameInput, 'keydown', event => {
         if (event.key === 'Enter') { event.preventDefault(); setEditing(false); }
         if (event.key === 'Escape') { event.preventDefault(); syncName(); setEditing(false); }

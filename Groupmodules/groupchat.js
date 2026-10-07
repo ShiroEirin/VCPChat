@@ -39,6 +39,20 @@ const activeRequestControllers = new Map();
 const groupQueueCancellationVersions = new Map();
 const CANVAS_PLACEHOLDER = '{{VCPChatCanvas}}';
 const GROUP_SESSION_WATCHER_PLACEHOLDER = '{{VCPChatGroupSessionWatcher}}';
+const WORKSPACE_PLACEHOLDER_HINT = '{{VCPChatWorkSpace';
+
+// {{VCPChatWorkSpace}} / {{VCPChatWorkSpace:文件夹名}}：展开为工作区目录树。
+// 延迟 require，避免与主进程模块初始化顺序耦合；失败时保留原文，不阻断群聊。
+async function expandWorkspacePlaceholdersInPrompt(text) {
+    if (typeof text !== 'string' || !text.includes(WORKSPACE_PLACEHOLDER_HINT)) return text;
+    try {
+        const { expandPlaceholders } = require('../modules/ipc/workspaceHandlers');
+        return typeof expandPlaceholders === 'function' ? await expandPlaceholders(text) : text;
+    } catch (error) {
+        console.warn('[GroupChat] 工作区占位符展开失败，保留原文:', error?.message || error);
+        return text;
+    }
+}
 
 
 let mainAppPaths = {}; // 将由 main.js 初始化时传入
@@ -917,6 +931,8 @@ async function handleGroupChatMessage(groupId, topicId, userMessage, sendStreamC
         if (Array.isArray(tavernRules) && tavernRules.length > 0) {
             combinedSystemPrompt = tavernEngine.applySystemSuffix(combinedSystemPrompt, tavernRules, 'group');
         }
+        // 最后展开工作区占位符，使 Tavern 预设规则中的占位符同样生效。
+        combinedSystemPrompt = await expandWorkspacePlaceholdersInPrompt(combinedSystemPrompt);
 
         // 2. 构建上下文结构 (每次循环都基于最新的 groupHistory)
         // 历史仍完整持久化；窗口仅限制本次发送给模型的最近楼层。
@@ -965,14 +981,26 @@ ${canvasData.errors || 'No errors'}
                         // 🟢 同步：多级路径探测。优先使用 internalPath (物理路径)
                         // 兼容上下文编辑/拖拽追加后附件元数据位于顶层，或 _fileManagerData 丢失的历史结构。
                         const effectiveType = fileManagerData.type || att?.type || '';
-                        const effectiveExtractedText = fileManagerData.extractedText || att?.extractedText || '';
+                        // @笔记实时引用：从笔记区真实文件重新读取最新内容。
+                        const isLiveNote = fileManagerData.isLiveReference === true || att?.isLiveReference === true;
+                        let effectiveExtractedText = fileManagerData.extractedText || att?.extractedText || '';
+                        const effectiveImageFrames = fileManagerData.imageFrames || att?.imageFrames;
+                        if (isLiveNote) {
+                            const liveText = await fileManager.readLiveReferenceText({ ...att, ...fileManagerData, isLiveReference: true });
+                            if (typeof liveText === 'string') effectiveExtractedText = liveText;
+                        }
                         const effectiveInternalPath = fileManagerData.internalPath || att?.internalPath;
                         const filePathForContext = effectiveInternalPath ||
                                                    att?.localPath ||
                                                    att?.src ||
                                                    (att?.name || '未知文件');
 
-                        if (typeof effectiveExtractedText === 'string' && effectiveExtractedText.trim() !== '') {
+                        if (isLiveNote) {
+                            const liveLabel = fileManager.describeLiveReference({ ...att, ...fileManagerData });
+                            textForAIContext += `\n\n[附加文件: ${filePathForContext} (${liveLabel})]\n${effectiveExtractedText}\n[/附加文件结束: ${att?.name || '未知文件'}]`;
+                        } else if (Array.isArray(effectiveImageFrames) && effectiveImageFrames.length > 0) {
+                            textForAIContext += `\n\n[附加文件: ${filePathForContext} (扫描版/图像型PDF，已内联 ${effectiveImageFrames.length} 页多模态图像)]\n${effectiveExtractedText || ''}`;
+                        } else if (typeof effectiveExtractedText === 'string' && effectiveExtractedText.trim() !== '') {
                             textForAIContext += `\n\n[附加文件: ${filePathForContext}]\n${effectiveExtractedText}\n[/附加文件结束: ${att?.name || '未知文件'}]`;
                         } else if (effectiveType.startsWith('audio/')) {
                             textForAIContext += `\n\n[附加音频: ${filePathForContext}]`;
@@ -997,6 +1025,16 @@ ${canvasData.errors || 'No errors'}
             if (msg.attachments && msg.attachments.length > 0) {
                 for (const att of msg.attachments) {
                     const fileManagerData = att && att._fileManagerData ? att._fileManagerData : {};
+                    const effectiveImageFrames = fileManagerData.imageFrames || att?.imageFrames;
+                    if (Array.isArray(effectiveImageFrames) && effectiveImageFrames.length > 0) {
+                        for (const frame of effectiveImageFrames) {
+                            vcpMessageContent.push({
+                                type: 'image_url',
+                                image_url: { url: `data:image/jpeg;base64,${frame}` }
+                            });
+                        }
+                        continue;
+                    }
                     const effectiveType = fileManagerData.type || att?.type || '';
                     const effectiveInternalPath = fileManagerData.internalPath || att?.internalPath || att?.src || att?.localPath;
                     const isSupportedMediaType = effectiveType.startsWith('image/') || effectiveType.startsWith('audio/') || effectiveType.startsWith('video/');
@@ -1514,13 +1552,15 @@ async function handleInviteAgentToSpeak(groupId, topicId, invitedAgentId, sendSt
         if (groupPrompt.includes(GROUP_SESSION_WATCHER_PLACEHOLDER)) {
             const sessionWatcherInfo = await getGroupSessionWatcher(groupId, topicId);
             groupPrompt = groupPrompt.replace(new RegExp(GROUP_SESSION_WATCHER_PLACEHOLDER, 'g'), JSON.stringify(sessionWatcherInfo));
-        }
         combinedSystemPrompt += `\n\n[群聊设定]:\n${groupPrompt}`;
     }
 
     // VCPChatTarven: 在系统提示词尾部追加 system_suffix 规则
     if (Array.isArray(tavernRulesInvite) && tavernRulesInvite.length > 0) {
         combinedSystemPrompt = tavernEngine.applySystemSuffix(combinedSystemPrompt, tavernRulesInvite, 'group');
+    }
+    // 最后展开工作区占位符，使 Tavern 预设规则中的占位符同样生效。
+    combinedSystemPrompt = await expandWorkspacePlaceholdersInPrompt(combinedSystemPrompt);
     }
 
     // 2. 构建上下文结构 (基于最新的 groupHistory)
@@ -1565,14 +1605,26 @@ ${canvasData.errors || 'No errors'}
                 // 🟢 极其关键：直接强取物理路径，不给文件名回退的机会
                 // 兼容上下文编辑/拖拽追加后附件元数据位于顶层，或 _fileManagerData 丢失的历史结构。
                 const effectiveType = fileManagerData.type || att?.type || '';
-                const effectiveExtractedText = fileManagerData.extractedText || att?.extractedText || '';
+                // @笔记实时引用：从笔记区真实文件重新读取最新内容。
+                const isLiveNote = fileManagerData.isLiveReference === true || att?.isLiveReference === true;
+                let effectiveExtractedText = fileManagerData.extractedText || att?.extractedText || '';
+                const effectiveImageFrames = fileManagerData.imageFrames || att?.imageFrames;
+                if (isLiveNote) {
+                    const liveText = await fileManager.readLiveReferenceText({ ...att, ...fileManagerData, isLiveReference: true });
+                    if (typeof liveText === 'string') effectiveExtractedText = liveText;
+                }
                 const effectiveInternalPath = fileManagerData.internalPath || att?.internalPath;
                 const filePathForContext = effectiveInternalPath ||
                                            att?.localPath ||
                                            att?.src ||
                                            (att?.name || '未知文件');
 
-                if (typeof effectiveExtractedText === 'string' && effectiveExtractedText.trim() !== '') {
+                if (isLiveNote) {
+                    const liveLabel = fileManager.describeLiveReference({ ...att, ...fileManagerData });
+                    textForAIContext += `\n\n[附加文件: ${filePathForContext} (${liveLabel})]\n${effectiveExtractedText}\n[/附加文件结束: ${att?.name || '未知文件'}]`;
+                } else if (Array.isArray(effectiveImageFrames) && effectiveImageFrames.length > 0) {
+                    textForAIContext += `\n\n[附加文件: ${filePathForContext} (扫描版/图像型PDF，已内联 ${effectiveImageFrames.length} 页多模态图像)]\n${effectiveExtractedText || ''}`;
+                } else if (typeof effectiveExtractedText === 'string' && effectiveExtractedText.trim() !== '') {
                     textForAIContext += `\n\n[附加文件: ${filePathForContext}]\n${effectiveExtractedText}\n[/附加文件结束: ${att?.name || '未知文件'}]`;
                 } else if (effectiveType.startsWith('audio/')) {
                     textForAIContext += `\n\n[附加音频: ${filePathForContext}]`;
@@ -1594,6 +1646,16 @@ ${canvasData.errors || 'No errors'}
         if (msg.attachments && msg.attachments.length > 0) {
             for (const att of msg.attachments) {
                 const fileManagerData = att && att._fileManagerData ? att._fileManagerData : {};
+                const effectiveImageFrames = fileManagerData.imageFrames || att?.imageFrames;
+                if (Array.isArray(effectiveImageFrames) && effectiveImageFrames.length > 0) {
+                    for (const frame of effectiveImageFrames) {
+                        vcpMessageContent.push({
+                            type: 'image_url',
+                            image_url: { url: `data:image/jpeg;base64,${frame}` }
+                        });
+                    }
+                    continue;
+                }
                 const effectiveType = fileManagerData.type || att?.type || '';
                 const effectiveInternalPath = fileManagerData.internalPath || att?.internalPath || att?.src || att?.localPath;
                 const isSupportedMediaType = effectiveType.startsWith('image/') || effectiveType.startsWith('audio/') || effectiveType.startsWith('video/');

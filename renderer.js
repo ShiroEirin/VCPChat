@@ -18,6 +18,9 @@ import { createMainChatThemeOwner } from './modules/renderer/mainChatThemeOwner.
 import { createMainChatSettingsPresentationOwner } from './modules/renderer/mainChatSettingsPresentationOwner.js';
 import { createMainChatAttachmentOwner } from './modules/renderer/mainChatAttachmentOwner.js';
 import { createMainChatSendOwner } from './modules/renderer/mainChatSendOwner.js';
+import { createConversationTurnNavigator } from './modules/ui-system/conversation-turn-navigator.js';
+import { createChatBackToBottom } from './modules/ui-system/chat-back-to-bottom.js';
+import { createChatComposerInset } from './modules/ui-system/chat-composer-inset.js';
 
 const streamManager = createStreamProjection();
 const messageRenderer = createMessageRenderer({ streamManager });
@@ -75,6 +78,7 @@ const mainChatSettingsOwner = createMainChatSettingsOwner({ initial: {
     chatToolFontCustom: '',
     enableUserChatBubbleUi: true,
     showUserMetaInChatBubbleUi: true,
+    enableTurnNavigator: true,
     voiceMode: 'local',
     voiceInputMode: 'windows_voice_typing',
     voiceInputShortcut: 'F7',
@@ -627,6 +631,47 @@ mainChatSettingsPresentationOwner.configureStartup({
         console.error('[RENDERER_INIT] inputEnhancer module not found!');
     }
 
+    if (window.ComposerModelSelect) {
+        const composerModelSelect = window.ComposerModelSelect.init({
+            electronAPI: window.electronAPI || chatAPI,
+            selectedItemRef: currentSelectedItemRef,
+            nameObserveTarget: currentChatNameH3,
+            sendMessageBtn,
+        });
+        ownedRendererSubscriptions.add({ dispose: () => composerModelSelect.dispose?.() });
+    }
+
+    // 「显示提问导航条」设置：关掉时整个卸载（不留观察器），设置加载或保存后按新值挂上或卸下
+    let conversationTurnNavigator = null;
+    const syncConversationTurnNavigator = () => {
+        const enabled = getGlobalSettings().enableTurnNavigator !== false;
+        if (enabled === (conversationTurnNavigator !== null)) return;
+        if (!enabled) {
+            conversationTurnNavigator.dispose();
+            conversationTurnNavigator = null;
+            return;
+        }
+        conversationTurnNavigator = createConversationTurnNavigator({
+            document,
+            messagesRoot: chatMessagesDiv,
+            releaseFollow: () => uiHelperFunctions.releaseChatScrollFollow?.()
+        });
+        conversationTurnNavigator.mount();
+    };
+    syncConversationTurnNavigator();
+    window.addEventListener('global-settings-updated', syncConversationTurnNavigator);
+    ownedRendererSubscriptions.add({ dispose: () => {
+        window.removeEventListener('global-settings-updated', syncConversationTurnNavigator);
+        conversationTurnNavigator?.dispose();
+        conversationTurnNavigator = null;
+    } });
+    const chatBackToBottom = createChatBackToBottom({ document, uiHelper: uiHelperFunctions, messagesRoot: chatMessagesDiv });
+    chatBackToBottom.mount();
+    ownedRendererSubscriptions.add({ dispose: () => chatBackToBottom.dispose() });
+    const chatComposerInset = createChatComposerInset({ document, uiHelper: uiHelperFunctions });
+    chatComposerInset.mount();
+    ownedRendererSubscriptions.add({ dispose: () => chatComposerInset.dispose() });
+
     const auxiliaryEventOwner = createMainChatAuxiliaryEventOwner({
         subscriptions: {
             loomShareText: chatAPI?.onLoomShareTextToInput,
@@ -955,6 +1000,7 @@ mainChatSettingsPresentationOwner.configureStartup({
             filterAgentList: uiHelperFunctions.filterAgentList,
             addNetworkPathInput: uiHelperFunctions.addNetworkPathInput,
             sendButtonAction: mainChatSendOwner.handleAction,
+            notifySendStateChanged: mainChatSendOwner.update,
             normalizeChatPresentationMode,
             applyChatPresentationMode,
             applyChatBubbleLayoutSettings,
@@ -997,45 +1043,12 @@ mainChatSettingsPresentationOwner.configureStartup({
         window.topicListManager.setupTopicSearch(); // Ensure this is called after DOM for topic search input is ready
         if(messageInput) uiHelperFunctions.autoResizeTextarea(messageInput);
 
-        if (quickNewTopicBtn && currentItemActionBtn) {
-            const syncQuickNewTopicButton = () => {
-                const isVisible = window.getComputedStyle(currentItemActionBtn).display !== 'none';
-                const buttonLabel = currentItemActionBtn.querySelector('.button-label')?.textContent?.trim();
-
-                quickNewTopicBtn.style.display = 'inline-flex';
-                quickNewTopicBtn.disabled = !isVisible;
-                quickNewTopicBtn.title = currentItemActionBtn.title || '新建聊天话题';
-
-                if (buttonLabel) {
-                    quickNewTopicBtn.setAttribute('aria-label', buttonLabel);
+        if (quickNewTopicBtn) {
+            mainChatDomListenerOwner.add(quickNewTopicBtn, 'click', () => {
+                if (window.TavernManager?.togglePopover) {
+                    window.TavernManager.togglePopover(quickNewTopicBtn);
                 }
-            };
-
-            const forwardCurrentItemAction = (eventName) => {
-                if (quickNewTopicBtn.disabled) return;
-                currentItemActionBtn.dispatchEvent(new MouseEvent(eventName, {
-                    bubbles: true,
-                    cancelable: true,
-                    view: window
-                }));
-            };
-
-            mainChatDomListenerOwner.add(quickNewTopicBtn, 'click', () => forwardCurrentItemAction('click'));
-            mainChatDomListenerOwner.add(quickNewTopicBtn, 'contextmenu', (event) => {
-                event.preventDefault();
-                forwardCurrentItemAction('contextmenu');
             });
-
-            const quickTopicObserver = mainChatDomListenerOwner.own(new MutationObserver(syncQuickNewTopicButton));
-            quickTopicObserver.observe(currentItemActionBtn, {
-                attributes: true,
-                attributeFilter: ['style', 'title'],
-                childList: true,
-                subtree: true,
-                characterData: true
-            });
-
-            syncQuickNewTopicButton();
         }
 
         // Set default view if no item is selected

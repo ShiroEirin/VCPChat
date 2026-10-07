@@ -37,6 +37,9 @@
     <link rel="stylesheet" href="vendor/fontawesome-v6/fontawesome-v6.css">
     <link rel="stylesheet" href="style.css">
     <link rel="stylesheet" href="styles/compact-sidebar.css">
+    <link rel="stylesheet" href="styles/ui-system/turn-navigator.css">
+    <link rel="stylesheet" href="styles/ui-system/chat-back-to-bottom.css">
+    <link rel="stylesheet" href="styles/ui-system/chat-composer-inset.css">
     <script src="modules/ui-system/lifecycle-scope.js"></script>
     <script src="modules/ui-system/performance-recorder.js"></script>
     <script src="modules/ui-system/task-handle.js"></script>
@@ -472,20 +475,17 @@
                             <path d="M7 16h6"></path>
                         </svg>
                     </button>
-                    <button id="toggleNotificationsBtn" class="header-button" type="button" title="左键打开通知面板/右键监控面板"
-                        aria-label="打开通知面板" aria-controls="notificationsSidebar" aria-expanded="false">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
-                            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
-                            aria-hidden="true">
-                            <path d="M10.268 21a2 2 0 0 0 3.464 0"></path>
-                            <path
-                                d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326">
-                            </path>
+                    <button id="voiceChatBtn" class="header-button" type="button" title="语音聊天"
+                        style="margin-right: 5px; display: none;">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" fill="none"
+                            stroke="currentColor" stroke-width="1.33" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <rect x="5" y="1.5" width="6" height="9" rx="3"></rect>
+                            <path d="M2.35 8.675C3.075 11.3 5.2 13.125 8 13.125C10.8 13.125 12.925 11.3 13.65 8.675M8 13.125V15"></path>
                         </svg>
                     </button>
 
                     <button id="currentAgentSettingsBtn" class="header-button" type="button" title="当前Agent设置" style="display: none;">
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 110 44" width="110" height="44"
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="2.6 0 97 44" width="97" height="44"
                             aria-hidden="true">
                             <g transform="translate(1 2) scale(1.62)" stroke="currentColor" stroke-width="2" fill="none"
                                 stroke-linejoin="round" stroke-linecap="round">
@@ -497,22 +497,23 @@
                             </g>
                             <g fill="currentColor" font-family="system-ui, -apple-system, sans-serif" font-size="15"
                                 font-weight="500">
-                                <text x="45" y="17">CREATE</text>
-                                <text x="45" y="33">TOPIC</text>
+                                <text x="45" y="19">CREATE</text>
+                                <text x="45" y="35">TOPIC</text>
                             </g>
                         </svg>
                         <span class="button-label">新建聊天话题</span>
                     </button>
-                    <button id="voiceChatBtn" class="header-button" type="button" title="语音聊天"
-                        style="margin-right: 5px; display: none;">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none"
-                            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M12 19v3"></path>
-                            <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
-                            <rect x="9" y="2" width="6" height="13" rx="3"></rect>
+                    <span id="nextUiChatNotificationHost" class="next-ui-notification-toggle-host"><button id="toggleNotificationsBtn" class="header-button" type="button" title="左键打开通知面板/右键监控面板"
+                        aria-label="打开通知面板" aria-controls="notificationsSidebar" aria-expanded="false">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+                            stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                            aria-hidden="true">
+                            <path d="M10.268 21a2 2 0 0 0 3.464 0"></path>
+                            <path
+                                d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326">
+                            </path>
                         </svg>
-                    </button>
-                    <span id="nextUiChatNotificationHost" class="next-ui-notification-toggle-host"></span>
+                    </button></span>
                 </div>
             </header>
             <div class="chat-messages-container vcp-ui-scope" data-density="comfortable">
@@ -554,15 +555,12 @@
                     <textarea id="messageInput" placeholder="输入消息... (Shift+Enter 换行)"
                         aria-label="消息内容" rows="1" disabled></textarea>
                     <div class="chat-input-actions">
-                        <button id="quickNewTopicBtn" type="button" title="新建聊天话题" aria-label="新建聊天话题" disabled>
+                        <button id="quickNewTopicBtn" type="button" title="高级回复" aria-label="打开高级回复设置" aria-haspopup="dialog" aria-expanded="false">
                             <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
                                 fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
                                 stroke-linejoin="round" aria-hidden="true">
-                                <path
-                                    d="M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z">
-                                </path>
-                                <path d="M12 8v6"></path>
-                                <path d="M9 11h6"></path>
+                                <path d="M12 5v14"></path>
+                                <path d="M5 12h14"></path>
                             </svg>
                         </button>
                         <button id="attachFileBtn" type="button" title="发送文件" aria-label="发送文件" disabled>
@@ -587,7 +585,17 @@
                                 <path d="M10 16s.8 1 2 1c1.3 0 2-1 2-1" />
                             </svg>
                         </button>
-                        <button id="sendMessageBtn" type="button" title="发送消息/右键回复设置" aria-label="发送消息" disabled>
+                        <button id="workspacePickerBtn" type="button" title="当前工作区：全部" aria-label="选择当前工作区" aria-haspopup="menu" aria-expanded="false">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
+                                fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                                stroke-linejoin="round" class="lucide lucide-folder-git-2" aria-hidden="true">
+                                <path d="M9 20H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H20a2 2 0 0 1 2 2v5" />
+                                <circle cx="13" cy="12" r="2" />
+                                <path d="M18 19c-2.8 0-5-2.2-5-5v8" />
+                                <circle cx="20" cy="19" r="2" />
+                            </svg>
+                        </button>
+                        <button id="sendMessageBtn" type="button" title="发送消息" aria-label="发送消息" disabled>
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
                                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                                 <path d="m5 12 7-7 7 7"></path>
@@ -598,7 +606,7 @@
                 </div>
             </footer>
           </main>
-          <div class="resizer" id="resizerRight"></div>
+          <div class="resizer vcp-ui-scope" id="resizerRight"></div>
           <aside class="notifications-sidebar vcp-ui-scope" id="notificationsSidebar">
             <header class="notifications-header">
                 <h4 id="notificationTitle" style="display: none;">VCP 通知</h4>
@@ -714,7 +722,7 @@
 
                 <div class="vcp-settings-source-layout">
                     <!-- 左侧导航菜单 -->
-                    <nav class="vcp-settings-source-nav" data-settings-sections='[{"value":"user-identity","label":"用户身份"},{"value":"server-connection","label":"服务器连接"},{"value":"jev-service","label":"Jev 服务"},{"value":"appearance-settings","label":"界面与外观"},{"value":"render-settings","label":"消息渲染"},{"value":"selection-assistant","label":"划词助手"},{"value":"voice-settings","label":"语音设置"},{"value":"advanced-features","label":"高级功能"},{"value":"quick-actions","label":"快捷操作"}]'>
+                    <nav class="vcp-settings-source-nav" data-settings-sections='[{"value":"user-identity","label":"用户身份"},{"value":"server-connection","label":"服务器连接"},{"value":"jev-service","label":"Jev 服务"},{"value":"appearance-settings","label":"界面与外观"},{"value":"render-settings","label":"消息渲染"},{"value":"selection-assistant","label":"划词助手"},{"value":"voice-settings","label":"语音设置"},{"value":"advanced-features","label":"高级功能"},{"value":"workspace-management","label":"工作区管理"},{"value":"quick-actions","label":"快捷操作"}]'>
                         <template class="vcp-settings-source-list">
                             <li class="vcp-settings-source-item active" data-section="user-identity">
                                 <svg class="settings-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -781,6 +789,13 @@
                                 </svg>
                                 <span>高级功能</span>
                             </li>
+                            <li class="vcp-settings-source-item" data-section="workspace-management">
+                                <svg class="settings-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                    stroke-width="2">
+                                    <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+                                </svg>
+                                <span>工作区管理</span>
+                            </li>
                             <li class="vcp-settings-source-item" data-section="quick-actions">
                                 <svg class="settings-nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                                     stroke-width="2">
@@ -817,6 +832,7 @@
                             <div class="settings-section" id="section-selection-assistant" data-settings-section-key="selection-assistant"></div>
                             <div class="settings-section" id="section-voice-settings" data-settings-section-key="voice-settings"></div>
                             <div class="settings-section" id="section-advanced-features" data-settings-section-key="advanced-features"></div>
+                            <div class="settings-section" id="section-workspace-management" data-settings-section-key="workspace-management"></div>
                             <div class="settings-section" id="section-quick-actions" data-settings-section-key="quick-actions"></div>
 
                         </form>
@@ -1320,6 +1336,14 @@
 
     <script src="modules/topicSummarizer.js"></script>
     <script src="modules/notificationRenderer.js"></script>
+    <script src="modules/voice/wavAudioEncoder.js"></script>
+    <script src="modules/voice/speechDirectiveMatcher.js"></script>
+    <script src="modules/voice/audioRecorder.js"></script>
+    <script src="modules/voice/voiceWaveform.js"></script>
+    <script src="modules/voice/voiceComposerView.js"></script>
+    <script src="modules/voice/passiveVoiceSentinel.js"></script>
+    <script src="modules/voice/chatVoiceComposer.js"></script>
+    <script src="modules/renderer/composerModelSelect.js"></script>
     <script src="modules/inputEnhancer.js"></script>
     <script src="modules/itemListManager.js"></script>
     <script src="modules/topicListManager.js"></script>

@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const { BrowserWindow, ipcMain, clipboard } = require('electron');
 const tmp = require('tmp');
 const chokidar = require('chokidar');
+const { CommandOutputParser } = require('./command-output-parser');
 
 // --- GUI Window Management ---
 let guiWindow = null;
@@ -651,9 +652,8 @@ function executeAdminCommand(command) {
             const tmpPathForPS = tmpFilePath.replace(/'/g, "''");
             const argumentList = `"${scriptPathForPS}", "${commandForPS}", "${tmpPathForPS}"`;
 
-            // 3. 构造PowerShell命令以管理员权限运行Python脚本
-            const psCommand = `Start-Process -FilePath "pythonw.exe" -ArgumentList ${argumentList} -Verb RunAs -Wait`;
-
+            // 3. 构造PowerShell命令以管理员权限运行Python脚本（捕获UAC异常并注入纯ASCII标记）
+            const psCommand = `$ErrorActionPreference = 'Stop'; try { Start-Process -FilePath "pythonw.exe" -ArgumentList ${argumentList} -Verb RunAs -Wait } catch { [Console]::Error.WriteLine('UAC_CANCELLED_OR_FAILED: ' + $_.Exception.Message) }`;
             const child = spawn('powershell.exe', [
                 '-NoProfile',
                 '-ExecutionPolicy', 'Bypass',
@@ -664,24 +664,67 @@ function executeAdminCommand(command) {
             childProcesses.add(child); // 跟踪进程
 
             let stderrOutput = '';
+            let isSettled = false;
+
+            // 310 秒外部安全定时器守护，防止后台卡死挂起 (Todo #3)
+            const safetyTimeout = setTimeout(() => {
+                if (isSettled) return;
+                isSettled = true;
+                try {
+                    child.kill();
+                } catch { }
+                childProcesses.delete(child);
+                cleanupCallback();
+                resolve({
+                    isCancelled: true,
+                    content: [{
+                        type: 'text',
+                        text: '⚠️ [操作超时]：等待管理员确认超时（超过无操作安全时限），系统已自动拒绝执行。'
+                    }]
+                });
+            }, 310000);
+
             child.stderr.on('data', (data) => {
                 stderrOutput += data.toString('utf-8');
             });
 
             child.on('error', (err) => {
+                if (isSettled) return;
+                isSettled = true;
+                clearTimeout(safetyTimeout);
                 childProcesses.delete(child); // 停止跟踪
                 cleanupCallback(); // 清理临时文件
                 reject(new Error(`无法启动PowerShell包装脚本: ${err.message}`));
             });
 
             child.on('close', (code) => {
+                if (isSettled) return;
+                isSettled = true;
+                clearTimeout(safetyTimeout);
                 childProcesses.delete(child); // 停止跟踪
-                // PowerShell脚本执行完毕，现在我们可以安全地读取临时文件的内容了。
+                // PowerShell脚本执行完毕，安全读取临时文件内容
                 fs.readFile(tmpFilePath, 'utf-8', (readErr, data) => {
-                    cleanupCallback(); // 确保无论如何都清理临时文件
+                    cleanupCallback(); // 确保清理临时文件
 
+                    // 检测 UAC 取消或拒绝错误（显式捕获标记、0x800704C7 或中文取消提示）
+                    const isUacCancelled = stderrOutput && (
+                        stderrOutput.includes('UAC_CANCELLED_OR_FAILED') ||
+                        stderrOutput.includes('0x800704C7') ||
+                        stderrOutput.includes('74C7') ||
+                        stderrOutput.includes('操作已被用户取消') ||
+                        stderrOutput.includes('The operation was canceled by the user')
+                    );
+
+                    if (isUacCancelled) {
+                        return resolve({
+                            isCancelled: true,
+                            content: [{
+                                type: 'text',
+                                text: '⚠️ [操作未执行/未授权]：用户在 Windows UAC 提权界面取消了授权，或未获取到管理员权限。敏感命令未执行。'
+                            }]
+                        });
+                    }
                     if (readErr) {
-                        // 如果读取文件失败，但我们从stderr得到了信息，就用它。
                         if (stderrOutput.trim()) {
                             return reject(new Error(`管理员脚本执行失败: ${stderrOutput.trim()}`));
                         }
@@ -690,9 +733,32 @@ function executeAdminCommand(command) {
 
                     const result = data.trim();
                     if (result === "USER_CANCELLED") {
-                        resolve("用户取消了管理员权限请求。");
+                        resolve({
+                            isCancelled: true,
+                            content: [{
+                                type: 'text',
+                                text: '⚠️ [操作已取消]：用户已主动拒绝或取消了本次管理员权限申请。敏感命令未执行。'
+                            }]
+                        });
+                    } else if (result === "TIMEOUT_REJECTED") {
+                        resolve({
+                            isCancelled: true,
+                            content: [{
+                                type: 'text',
+                                text: '⚠️ [操作超时]：等待管理员确认超时（超过无操作安全时限），系统已自动拒绝执行。'
+                            }]
+                        });
                     } else if (result.startsWith("ERROR:")) {
                         reject(new Error(result.substring(6).trim()));
+                    } else if (result === "") {
+                        // 空输出防穿透：脚本根本未生成内容或提权未通过时，绝不能当作正常执行成功
+                        resolve({
+                            isCancelled: true,
+                            content: [{
+                                type: 'text',
+                                text: '⚠️ [操作未执行/未授权]：用户在 Windows UAC 提权界面取消了授权，或未获取到管理员权限。敏感命令未执行。'
+                            }]
+                        });
                     } else {
                         resolve(result);
                     }
@@ -756,7 +822,7 @@ function requestInteractiveConfirmation(command) {
                     const result = data.trim();
                     if (result === 'CONFIRMED') {
                         resolve(true);
-                    } else if (result === 'USER_CANCELLED') {
+                    } else if (result === 'USER_CANCELLED' || result === 'TIMEOUT_REJECTED') {
                         resolve(false);
                     } else if (result.startsWith('ERROR:')) {
                         reject(new Error(result.substring(6).trim()));
@@ -770,18 +836,20 @@ function requestInteractiveConfirmation(command) {
 }
 
 /**
- * 将 PTY 原始输出分发给消费者。
- * 一期只转发给 GUI；二期可在这里接入 @xterm/headless 等后端终端 buffer。
- * @param {string|Buffer} rawData - PTY 原始输出，不能在 GUI 路径前清洗 ANSI。
+ * GUI 仅接收原始PTY投影；渲染窗口失效不得打断命令完成检测。
  */
 function dispatchPtyData(rawData) {
-    if (!guiWindow || guiWindow.isDestroyed()) {
-        return;
-    }
-
-    const dataStr = rawData.toString('utf-8');
-    if (dataStr) {
-        guiWindow.webContents.send('powershell-data', dataStr);
+    try {
+        if (!guiWindow || guiWindow.isDestroyed()
+            || guiWindow.webContents.isDestroyed()) {
+            return;
+        }
+        const dataStr = rawData.toString('utf-8');
+        if (dataStr) {
+            guiWindow.webContents.send('powershell-data', dataStr);
+        }
+    } catch (error) {
+        console.warn('[PowerShellExecutor] GUI output delivery failed:', error.message);
     }
 }
 
@@ -880,7 +948,16 @@ function createNewPtySession() {
         cols: lastKnownSize.cols,
         rows: lastKnownSize.rows,
         cwd: process.env.USERPROFILE || process.env.HOME,
-        env: process.env
+        env: {
+            ...process.env,
+            PAGER: 'cat',
+            GIT_PAGER: 'cat',
+            GIT_TERMINAL_PROMPT: '0',
+            GH_PAGER: '',
+            SYSTEMD_PAGER: 'cat',
+            AWS_PAGER: '',
+            MANPAGER: 'cat'
+        }
     });
     childProcesses.add(ptyProcess);
     const currentPtyProcess = ptyProcess;
@@ -949,6 +1026,15 @@ function createNewPtySession() {
 
         const initializationCommand = [
             '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8',
+            '$env:PAGER = "cat"',
+            '$env:GIT_PAGER = "cat"',
+            '$env:GIT_TERMINAL_PROMPT = "0"',
+            '$env:GH_PAGER = ""',
+            '$env:SYSTEMD_PAGER = "cat"',
+            '$env:AWS_PAGER = ""',
+            '$env:MANPAGER = "cat"',
+            'function global:more { param([string[]]$paths) if ($paths) { foreach ($file in $paths) { Get-Content $file } } else { $input } }',
+            'function global:help { Get-Help @args }',
             `$__vcpReady = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${encodedReadyBoundary}'))`,
             'Write-Host $__vcpReady'
         ].join('; ');
@@ -1099,7 +1185,7 @@ function executeSingleCommandInPty(ptyProcess, singleCommand) {
         }
 
         let rawOutput = '';
-        let hasSeenStartBoundary = false;
+
         let settled = false;
         let tempScriptPath = null;
         let listenerDisposable = null;
@@ -1107,6 +1193,7 @@ function executeSingleCommandInPty(ptyProcess, singleCommand) {
 
         const startBoundary = `__VCP_COMMAND_START_${crypto.randomUUID()}__`;
         const endBoundary = `__VCP_COMMAND_END_${crypto.randomUUID()}__`;
+        const outputParser = new CommandOutputParser(startBoundary, endBoundary);
 
         const abortThisCommand = () => {
             if (settled) {
@@ -1152,33 +1239,17 @@ function executeSingleCommandInPty(ptyProcess, singleCommand) {
                 return;
             }
 
-            let chunk = data.toString('utf-8');
+            const result = outputParser.push(data.toString('utf-8'));
+            rawOutput += result.output;
 
-            // 丢弃开始边界之前的所有迟到输出，避免上一条命令残留串入本次结果
-            if (!hasSeenStartBoundary) {
-                const startIndex = chunk.indexOf(startBoundary);
-                if (startIndex === -1) {
-                    return;
-                }
-
-                hasSeenStartBoundary = true;
-                chunk = chunk.substring(startIndex + startBoundary.length);
-            }
-
-            const endIndex = chunk.indexOf(endBoundary);
-            if (endIndex !== -1) {
-                const finalChunk = chunk.substring(0, endIndex);
-                rawOutput += finalChunk;
-                flushToGui(finalChunk);
-
+            if (result.done) {
                 settled = true;
                 cleanupListener(listenerDisposable, timeoutId);
                 resolve(sanitizeTerminalOutput(rawOutput).trim());
-                return;
             }
 
-            rawOutput += chunk;
-            flushToGui(chunk);
+            // GUI 是投影，不是完成裁决者；保留同块中的结束后提示符。
+            flushToGui(result.output + result.trailing);
         });
 
         timeoutId = setTimeout(() => {
@@ -1207,6 +1278,9 @@ function executeSingleCommandInPty(ptyProcess, singleCommand) {
             // 就会把命令尚未执行的回显误判为真实输出，造成提前结束或卡死。
             // 因此这里用 Base64 在 PowerShell 内部还原 boundary，让 GUI/AI 只匹配真实 Write-Host 输出。
             const wrappedCommand = [
+                `$env:PAGER = 'cat'`,
+                `$env:GIT_PAGER = 'cat'`,
+                `$env:GIT_TERMINAL_PROMPT = '0'`,
                 `$__vcpStart = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${encodedStartBoundary}'))`,
                 `$__vcpEnd = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${encodedEndBoundary}'))`,
                 `Write-Host $__vcpStart`,
@@ -1697,9 +1771,12 @@ async function processToolCall(args) {
             ptyProcess = null;
         }
         const command = commandEntries[0].value;
-        const fullCommand = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ${command}`;
+        const fullCommand = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $env:PAGER = 'cat'; $env:GIT_PAGER = 'cat'; $env:GIT_TERMINAL_PROMPT = '0'; function global:more { param([string[]]$paths) if ($paths) { foreach ($file in $paths) { Get-Content $file } } else { $input } }; function global:help { Get-Help @args }; ${command}`;
         const output = await executeAdminCommand(fullCommand);
-        const cleanOutput = output.replace(/\r\n/g, '\n').replace(/\r/g, '');
+        if (output && typeof output === 'object' && Array.isArray(output.content)) {
+            return output;
+        }
+        const cleanOutput = (typeof output === 'string' ? output : String(output || '')).replace(/\r\n/g, '\n').replace(/\r/g, '');
         return { content: [{ type: 'text', text: `\`\`\`powershell\n${cleanOutput}\n\`\`\`` }] };
     }
 
@@ -1714,6 +1791,9 @@ async function processToolCall(args) {
     }
 
     // 路径 C: 标准非管理员会话执行
+    if (isExecutingCommand) {
+        throw new Error('当前已有同步命令执行中，请等待完成或使用 interrupt。');
+    }
     ensureGuiWindow();
 
     if (newSession || !ptyProcess) {
@@ -1740,6 +1820,10 @@ async function processToolCall(args) {
         throw new Error('当前终端正被交互式程序 (snow/codex/claude) 占用，请先退出并调用 action:"endInteractive"，或使用 newSession:true 重置会话。');
     }
 
+    // 就绪等待期间其它调用可能先取得PTY，await后必须再次检查。
+    if (isExecutingCommand) {
+        throw new Error('当前已有同步命令执行中，请等待完成或使用 interrupt。');
+    }
     const deltaOutputs = [];
     isExecutingCommand = true;
     try {
