@@ -24,7 +24,12 @@ import {
     isToolResultHidden,
     setToolResultHidden,
 } from './renderer/toolResultRegions.js';
+import { createToolPresentation } from './renderer/toolPresentation.js';
 import { parseJevToolUse } from './renderer/jevToolUse.js';
+import {
+    findMalformedToolFields,
+    describeToolRequestMarkerProblem
+} from './renderer/toolRequestMarkers.js';
 
 import { createContentProcessor } from './renderer/contentProcessor.js';
 import { createMessageContextMenu } from './renderer/messageContextMenu.js';
@@ -861,7 +866,7 @@ function applyFrontendRegexRules(text, rules, role, depth) {
  * @param {Map} [codeBlockMap] Map of code block placeholders to their original content.
  * @returns {string} The processed text with special blocks as HTML.
  */
-function transformSpecialBlocks(text, codeBlockMap, thoughtChainMap = null) {
+function transformSpecialBlocks(text, codeBlockMap, thoughtChainMap = null, toolRequestSourceMap = null) {
     let processed = text;
 
     const restoreBlocks = (textStr) => {
@@ -1118,9 +1123,12 @@ function transformSpecialBlocks(text, codeBlockMap, thoughtChainMap = null) {
 
     // Process Tool Requests
     processed = replaceToolRequestBlocks(processed, (match, content) => {
+        // 保护阶段已把「始」「末」字段值转义过一次（日记分支仍按这份交给 Markdown）。
+        // 工具气泡在输出处自己转义，必须用原文，否则引号等会显示成 &#039;。
+        const source = toolRequestSourceMap?.get(match) ?? content;
         const detectedToolName = extractMarkedField(content, /tool_name:\s*/i);
         const detectedCommand = extractMarkedField(content, /command:\s*/i);
-        const detectedJev = parseJevToolUse(extractMarkedField(content, /JEV:\s*/i));
+        const detectedJev = parseJevToolUse(extractMarkedField(source, /JEV:\s*/i));
         const normalizedToolName = (detectedToolName || '').trim().toLowerCase();
         const normalizedCommand = (detectedCommand || '').trim().toLowerCase();
 
@@ -1163,7 +1171,7 @@ function transformSpecialBlocks(text, codeBlockMap, thoughtChainMap = null) {
         } else if (detectedJev) {
             // JEV 是自然语言工具入口的兼容展示分支，不替代既有 tool_name/XML 协议。
             // 显式单引号工具名优先；未显式指定时才展示能力名称。
-            const escapedFullContent = escapeHtml(restoreBlocks(content))
+            const escapedFullContent = escapeHtml(restoreBlocks(source))
                 .replace(/\r\n?|\n/g, '&#10;');
             const jevLabel = detectedJev.displayName ? 'JEVToolUse:' : 'JEVToolUse';
             const jevNameHtml = detectedJev.displayName
@@ -1179,10 +1187,10 @@ function transformSpecialBlocks(text, codeBlockMap, thoughtChainMap = null) {
                 `</div>\n\n`;
         } else {
             // --- It's a regular tool call, render it normally ---
-            const xmlToolNameMatch = content.match(/<tool_name>([\s\S]*?)<\/tool_name>/i);
+            const xmlToolNameMatch = source.match(/<tool_name>([\s\S]*?)<\/tool_name>/i);
 
-            let toolName = 'Processing...';
-            let extractedName = (xmlToolNameMatch?.[1] || detectedToolName || '').trim();
+            let toolName = '';
+            let extractedName = (xmlToolNameMatch?.[1] || extractMarkedField(source, /tool_name:\s*/i) || '').trim();
             if (extractedName) {
                 extractedName = extractedName.replace(/[「{](?:始|末)(?:[Ee][Ss][Cc][Aa][Pp][Ee])?[」}]/gi, '').replace(/,$/, '').trim();
             }
@@ -1190,11 +1198,19 @@ function transformSpecialBlocks(text, codeBlockMap, thoughtChainMap = null) {
                 toolName = extractedName;
             }
 
+            const malformedFields = findMalformedToolFields(source);
+            const markerProblem = describeToolRequestMarkerProblem({ toolName, malformedFields });
+            toolName = markerProblem.displayName;
+            const malformedClass = markerProblem.isMalformed ? ' is-malformed' : '';
+            const malformedHintHtml = markerProblem.hint
+                ? ` <span class="vcp-tool-malformed-hint">${escapeHtml(markerProblem.hint)}</span>`
+                : '';
+
             // 工具气泡会在外层继续经过 marked.parse()。如果把参数中的真实换行直接放进
             // <pre>，空行会终止 CommonMark raw HTML block，导致后续 Markdown 被浏览器
             // 收进尚未闭合的 <pre>，表现为“后续渲染被吞”。用字符实体保存换行，使整个
             // 气泡对 Markdown 解析器保持为单行、不可拆分 HTML；写入 DOM 后仍显示为换行。
-            const escapedFullContent = escapeHtml(restoreBlocks(content))
+            const escapedFullContent = escapeHtml(restoreBlocks(source))
                 .replace(/\r\n?|\n/g, '&#10;');
             /*
              * ToolUse 载荷可能包含超长单行 JSON / JavaScript。折叠时若仍把
@@ -1204,10 +1220,11 @@ function transformSpecialBlocks(text, codeBlockMap, thoughtChainMap = null) {
              * <template> 的 DocumentFragment 不参与样式、布局、绘制与合成；
              * 点击展开时才将其克隆到 .vcp-tool-details，收起时再次释放。
              */
-            return `\n\n<div class="vcp-tool-use-bubble" data-vcp-block-type="tool-use" data-vcp-preserve-children="true">` +
+            return `\n\n<div class="vcp-tool-use-bubble${malformedClass}" data-vcp-block-type="tool-use" data-vcp-preserve-children="true">` +
                 `<div class="vcp-tool-summary">` +
                 `<span class="vcp-tool-label">VCP-ToolUse:</span> ` +
                 `<span class="vcp-tool-name-highlight">${escapeHtml(toolName)}</span>` +
+                malformedHintHtml +
                 `</div>` +
                 `<div class="vcp-tool-details"></div>` +
                 `<template class="vcp-tool-details-template"><pre>${escapedFullContent}</pre></template>` +
@@ -2546,7 +2563,10 @@ let mainRendererReferences = null;
 let contentPipeline = null;
 let contentRuntime = null;
 let rendererListenerDisposers = [];
+let toolPresentation = null;
 function disposeRendererListeners() {
+    toolPresentation?.dispose();
+    toolPresentation = null;
     rendererListenerDisposers.splice(0).reverse().forEach(dispose => { try { dispose(); } catch (error) { console.warn('[MessageRenderer] listener dispose failed:', error); } });
 }
 function disposeRendererResources() {
@@ -2633,16 +2653,7 @@ function cleanupMessageDomResources(messageItem, messageId = null) {
             clearTimeout(contentDiv._vcpDeferredHighlightTimer);
             delete contentDiv._vcpDeferredHighlightTimer;
         }
-        if (contentDiv._vcpPretextIdleHandle) {
-            const { kind, id } = contentDiv._vcpPretextIdleHandle;
-            const ownerWindow = contentDiv.ownerDocument?.defaultView;
-            if (kind === 'idle' && typeof ownerWindow?.cancelIdleCallback === 'function') {
-                ownerWindow.cancelIdleCallback(id);
-            } else if (kind === 'timer') {
-                clearTimeout(id);
-            }
-            delete contentDiv._vcpPretextIdleHandle;
-        }
+        cancelPretextEstimate(contentDiv);
         cleanupMermaidViewers(contentDiv);
         contentProcessor.cleanupPreviewsInContent(contentDiv);
         cleanupAnimationsInContent(contentDiv);
@@ -2734,8 +2745,8 @@ function initializeMessageRenderer(refs) {
         deIndentHtml,
         deIndentToolRequestBlocks: contentProcessor.deIndentToolRequestBlocks,
         applyContentProcessors: contentProcessor.applyContentProcessors,
-        transformSpecialBlocks: (text, codeBlockMap, thoughtChainMap) =>
-            transformSpecialBlocks(text, codeBlockMap, thoughtChainMap),
+        transformSpecialBlocks: (text, codeBlockMap, thoughtChainMap, toolRequestSourceMap) =>
+            transformSpecialBlocks(text, codeBlockMap, thoughtChainMap, toolRequestSourceMap),
         ensureHtmlFenced,
         transformFlowlockBlocks: (text) => {
             if (!mainRendererReferences.flowlockProtocol || typeof mainRendererReferences.flowlockProtocol.transformForRender !== 'function') {
@@ -2776,6 +2787,19 @@ function initializeMessageRenderer(refs) {
     // 🟢 关键修复：IntersectionObserver 的 root 必须是产生滚动条的那个父容器
     const scrollContainer = mainRendererReferences.chatMessagesDiv.closest('.chat-messages-container');
     visibilityOptimizer.initializeVisibilityOptimizer(scrollContainer || mainRendererReferences.chatMessagesDiv);
+
+    toolPresentation = createToolPresentation({
+        root: mainRendererReferences.chatMessagesDiv,
+        getLocalConfig: () => {
+            const item = mainRendererReferences.currentSelectedItemRef.get();
+            return item?.config || item;
+        },
+        getProfile: () => {
+            const appearance = mainRendererReferences.realm?.VCPAppearance;
+            return appearance?.getCurrent?.()
+                || appearance?.normalize?.(mainRendererReferences.globalSettingsRef.get().appearanceProfile, 'next');
+        }
+    });
 
     // --- Event Delegation ---
     ownRendererListener(mainRendererReferences.chatMessagesDiv, 'click', (e) => {
@@ -3549,6 +3573,7 @@ async function renderPostProcessedHtml(contentDiv, rawHtml, options = {}) {
     };
 
     if (typeof rawHtml === 'string') {
+        toolPresentation?.capture(contentDiv);
         // 替换 innerHTML 前必须释放旧子树上的预览 iframe、window message 监听器、
         // 动画/WebGL 资源及大工具结果完整文本。
         cleanupChatMedia(contentDiv);
@@ -3577,6 +3602,8 @@ async function renderPostProcessedHtml(contentDiv, rawHtml, options = {}) {
     }
 
     if (!isStillValid()) return;
+
+    toolPresentation?.apply(contentDiv);
 
     // 原生 audio 负责媒体播放，自定义控件层负责一致的主题与交互。
     // 放在附件渲染之后，可同时覆盖 Markdown HTML 音频和消息附件音频。
@@ -4244,24 +4271,53 @@ function scheduleMessagePretextEstimate(messageId, text, contentDiv) {
         }
     };
 
-    if (contentDiv?._vcpPretextIdleHandle) {
-        const previous = contentDiv._vcpPretextIdleHandle;
-        const ownerWindow = contentDiv.ownerDocument?.defaultView;
-        if (previous.kind === 'idle' && typeof ownerWindow?.cancelIdleCallback === 'function') ownerWindow.cancelIdleCallback(previous.id);
-        else if (previous.kind === 'timer') clearTimeout(previous.id);
-    }
-    const wrappedRun = () => {
-        if (contentDiv) delete contentDiv._vcpPretextIdleHandle;
-        run();
-    };
     const ownerWindow = contentDiv?.ownerDocument?.defaultView;
-    if (typeof ownerWindow?.requestIdleCallback === 'function') {
-        const id = ownerWindow.requestIdleCallback(wrappedRun, { timeout: 300 });
-        if (contentDiv) contentDiv._vcpPretextIdleHandle = { kind: 'idle', id };
-    } else {
-        const id = ownerWindow?.setTimeout?.(wrappedRun, 0) || setTimeout(wrappedRun, 0);
-        if (contentDiv) contentDiv._vcpPretextIdleHandle = { kind: 'timer', id };
+    enqueuePretextEstimate(ownerWindow, contentDiv || messageId, run);
+}
+
+/*
+ * 每条消息各占一个 requestIdleCallback 时，40 条历史就是 40 个排在前面的回调，
+ * 历史分批插入的 idle 回调只能等它们逐个跑完（每个还要读一次 clientWidth 触发布局），
+ * 大话题打开因此慢约 0.4s。这里每个窗口只挂一个 idle 回调，按 deadline 分片消费队列，
+ * 没做完就重新排队，让已经排着的分批插入先执行。同一节点重复渲染时覆盖旧任务。
+ */
+const pretextEstimateQueues = new WeakMap();
+
+function getPretextQueueOwner(ownerWindow) {
+    return typeof ownerWindow?.requestIdleCallback === 'function' ? ownerWindow : globalThis;
+}
+
+function enqueuePretextEstimate(ownerWindow, key, run) {
+    const queueOwner = getPretextQueueOwner(ownerWindow);
+    let state = pretextEstimateQueues.get(queueOwner);
+    if (!state) {
+        state = { jobs: new Map(), scheduled: false };
+        pretextEstimateQueues.set(queueOwner, state);
     }
+    state.jobs.delete(key);
+    state.jobs.set(key, run);
+    if (state.scheduled) return;
+
+    const schedule = () => {
+        state.scheduled = true;
+        if (queueOwner !== globalThis) queueOwner.requestIdleCallback(drain, { timeout: 300 });
+        else setTimeout(drain, 0);
+    };
+    const drain = (deadline) => {
+        state.scheduled = false;
+        for (const [jobKey, job] of state.jobs) {
+            state.jobs.delete(jobKey);
+            job();
+            if (!deadline || deadline.didTimeout || deadline.timeRemaining() <= 1) break;
+        }
+        if (state.jobs.size > 0) schedule();
+    };
+    schedule();
+}
+
+function cancelPretextEstimate(contentDiv) {
+    const queueOwner = getPretextQueueOwner(contentDiv?.ownerDocument?.defaultView);
+    pretextEstimateQueues.get(queueOwner)?.jobs.delete(contentDiv);
 }
 
 async function renderFullMessageProjection(messageId, fullContent, agentName, agentId, root = mainRendererReferences.chatMessagesDiv) {

@@ -24,7 +24,7 @@ test('all chat modes keep the composer overlay free of backdrop-breaking masks',
 test('presentation modes share composer width and padding', () => {
     const css = fs.readFileSync('styles/chat.css', 'utf8');
     const shellCss = fs.readFileSync('styles/ui-next.css', 'utf8');
-    assert.match(shellCss, /html body \.chat-input-area\s*\{[^}]*padding-left:\s*52px;[^}]*padding-right:\s*52px;/);
+    assert.match(shellCss, /html body \.chat-input-area\s*\{[^}]*padding-left:\s*clamp\(12px, [^;]+, 52px\);[^}]*padding-right:\s*clamp\(12px, [^;]+, 52px\);/);
     for (const match of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
         const [, selectors, declarations] = match;
         if (!/chat-presentation-(?:panel|immersive)/.test(selectors)) continue;
@@ -41,4 +41,16 @@ test('flat reading modes retain one shared surface without extra composer or mes
     assert.match(css, /body\.chat-presentation-panel \.chat-messages-container,\s*body\.chat-presentation-immersive \.chat-messages-container\s*\{[^}]*background:\s*var\(--chat-presentation-surface\);[^}]*backdrop-filter:\s*var\(--chat-presentation-surface-filter\);/);
     assert.doesNotMatch(css, /body\.chat-presentation-(?:panel|immersive) \.chat-input-area\s*[,{]/);
     assert.doesNotMatch(inputCss, /body:is\(\.chat-presentation-panel, \.chat-presentation-immersive\)[^{]*\.chat-input-card\s*\{/);
+});
+
+test('main composer shares notification material without changing side composer or blur', () => {
+    const css = fs.readFileSync('styles/ui-system/chat-input.css', 'utf8');
+    const shellCss = fs.readFileSync('styles/ui-next.css', 'utf8');
+    const rule = css.match(/html main\.main-content > \.chat-input-area\.vcp-ui-scope \.chat-input-card\s*\{([^}]+)\}/);
+    assert.ok(rule, 'notification material is scoped to the main composer');
+    assert.match(rule[1], /background:\s*var\(--next-shell-bg, var\(--panel-bg\)\);/);
+    assert.match(rule[1], /background-image:\s*var\(--next-material-sheen, none\);/);
+    assert.doesNotMatch(rule[1], /(?:backdrop-filter|padding|border-radius)\s*:/);
+    assert.match(shellCss, /\.notifications-list \.notification-item\s*\{[^}]*background-color:\s*var\(--next-shell-bg\);[^}]*background-image:\s*var\(--next-material-sheen\);/);
+    assert.match(css, /html \.vcp-ui-scope \.chat-input-card\s*\{[^}]*backdrop-filter:\s*blur\(10px\) saturate\(112%\);/);
 });

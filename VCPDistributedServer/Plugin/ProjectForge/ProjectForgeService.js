@@ -12,6 +12,7 @@ const fsp = fs.promises;
 const path = require('path');
 const EventEmitter = require('events');
 const { ProjectStore, sha256 } = require('./store');
+const { applyGuiRevert } = require('./gui-revert-file');
 const engine = require('./engine');
 const { WorkspaceResolver } = require('./workspace');
 const { TicketStore, parsePickSpec } = require('./tickets');
@@ -24,6 +25,7 @@ const T = require('../../shared/fileKit/text');
 const { validateCode, diffDiagnostics, isValidatable } = require('../../shared/fileKit/validator');
 const { unifiedDiff } = require('../../shared/fileKit/diff');
 const { readFilesAsContent } = require('../../shared/fileKit/reader');
+const { isBinaryExtension, parseBinaryBuffer } = require('../../shared/fileKit/binaryReader');
 const { textResult, partsResult, formatDiagnostics } = require('../../shared/fileKit/output');
 
 const P = '[ProjectForge]';
@@ -753,6 +755,30 @@ async function outlineCmd(args) {
     for (const file of files.slice(0, runtime.readMaxFiles)) {
         const disk = await readDisk(file.abs);
         if (!disk.exists) { blocks.push(`### \`${file.rel}\`\n- 文件不存在`); continue; }
+
+        if (isBinaryExtension(file.rel)) {
+            let outline = await outlineOf(file.rel, null);
+            if (!outline) {
+                try {
+                    outline = parseBinaryBuffer(disk.buffer, file.rel, disk.buffer.length);
+                } catch {
+                    // 安全忽略，后续判断统一报错
+                }
+            }
+            if (!outline) { blocks.push(`### \`${file.rel}\`\n- ${astUnavailableReason(file.rel)}`); continue; }
+            if (outline.isBinary) {
+                const secLines = (outline.sections || []).map(s => `  - 节区 \`${s.name}\` · VAddr: ${s.virtualAddress} | Raw: ${(s.rawSize / 1024).toFixed(1)} KB | Perm: ${s.permissions} | Entropy: ${s.entropy} (${s.entropyStatus})`);
+                const symLines = (outline.symbols || []).map(s => `  - 导出 \`${s.name}\` · RVA: ${s.rva}${s.demangled && s.demangled !== s.name ? ` (${s.demangled})` : ''}`);
+                blocks.push([
+                    `### \`${file.rel}\` · ${outline.format || 'Binary'} / ${outline.architecture || 'unknown'} · 节区 ${outline.sections?.length || 0} / 导出 ${outline.symbols?.length || 0}`,
+                    secLines.length ? secLines.join('\n') : '- （无节区信息）',
+                    symLines.length ? symLines.join('\n') : '- （无导出符号）',
+                ].join('\n'));
+                details.push({ path: file.rel, isBinary: true, format: outline.format, architecture: outline.architecture, sections: outline.sections, symbols: outline.symbols });
+                continue;
+            }
+        }
+
         let meta;
         try { meta = decodeText(disk.buffer, file.rel); } catch (error) { blocks.push(`### \`${file.rel}\`\n- ${error.message}`); continue; }
         const outline = await outlineOf(file.rel, meta.text);
@@ -1921,9 +1947,12 @@ const gui = {
      * mode=before：撤销该节点，文件恢复到改动前；mode=after：文件恢复到该节点完成时的状态。
      * 与 Rollback 一致：外部修改或后续还有改动视为冲突，需 force；回退本身生成新批次，可再回退。
      */
-    async revertFileChange({ projectId, nodeId, mode = 'before', signature, reason = '', dryRun = false, force = false } = {}) {
+    async revertFileChange({ projectId, nodeId, mode = 'before', signature, reason = '', dryRun = false, force = false, expectedHash } = {}) {
         const maid = String(signature || '').trim().slice(0, 100);
         if (!maid) throw new Error(`${P} 回退需要署名。`);
+        if (expectedHash !== undefined && expectedHash !== null && (typeof expectedHash !== 'string' || !/^[a-f0-9]{64}$/.test(expectedHash))) {
+            throw new Error(`${P} 回退预检的文件 hash 无效，请重新预检。`);
+        }
         const ctx = projectOf({ projectid: projectId }, { write: true });
         return withLock(ctx.project.id, async () => {
             const s = store();
@@ -1943,27 +1972,31 @@ const gui = {
             if (disk.hash !== expected) conflicts.push('磁盘内容与记录不一致（外部修改）');
             if (later) conflicts.push(`此后该文件还有 ${later} 次改动，将一并被覆盖`);
             const label = `${useAfter ? '恢复到' : '撤销'}节点 n${node.id} · ${node.file_path}（GUI 人工回退）`;
-            const plan = { label, file: node.file_path, action, conflicts, mode: useAfter ? 'after' : 'before' };
+            const plan = { label, file: node.file_path, action, conflicts, mode: useAfter ? 'after' : 'before', expectedHash: disk.hash };
             if (action === '无需操作') return { status: 'noop', ...plan };
             if (dryRun) return { status: 'dryRun', ...plan };
+            // force 只确认预检时看到的冲突，不能顺带覆盖确认页打开后的新编辑。
+            // null 表示预检时文件不存在；未传 expectedHash 的旧调用保留原有语义。
+            if (expectedHash !== undefined && disk.hash !== expectedHash) {
+                return { status: 'conflict', ...plan, conflicts: [...conflicts, '文件在预检后发生变化，请重新预检'] };
+            }
             if (conflicts.length && !force) return { status: 'conflict', ...plan };
 
             let batchId;
             let newNodeId;
             await assertDiskUnchanged(file.abs, disk.hash, node.file_path);
             if (disk.exists) s.putBlob(disk.buffer);
-            if (target === null) {
-                await moveToTrash(file.abs);
-            } else {
-                await fsp.mkdir(path.dirname(file.abs), { recursive: true });
-                await fsp.writeFile(file.abs, s.getBlob(target));
-            }
-            s.transaction(() => {
-                batchId = s.createBatch(ctx.project.id, 'rollback', String(reason || '').trim().slice(0, 500) || label, maid);
-                newNodeId = s.addNode({
-                    projectId: ctx.project.id, batchId, filePath: node.file_path, op: 'rollback',
-                    beforeHash: disk.hash, afterHash: target, summary: label,
-                });
+            await applyGuiRevert({
+                file: file.abs, disk, target, content: target === null ? null : s.getBlob(target),
+                recoveryDir: path.join(path.dirname(runtime.dbPath), 'recovery'),
+                readDisk, trash: moveToTrash, logger: runtime.logger,
+                record: () => s.transaction(() => {
+                    batchId = s.createBatch(ctx.project.id, 'rollback', String(reason || '').trim().slice(0, 500) || label, maid);
+                    newNodeId = s.addNode({
+                        projectId: ctx.project.id, batchId, filePath: node.file_path, op: 'rollback',
+                        beforeHash: disk.hash, afterHash: target, summary: label,
+                    });
+                }),
             });
             runtime.logger?.log?.(`${P} GUI 回退 n${node.id} by @${maid} → b${batchId}`);
             emitProjectChanged({ action: 'gui:revert', projectId: ctx.project.id, batchId, nodeId: newNodeId, maid });
