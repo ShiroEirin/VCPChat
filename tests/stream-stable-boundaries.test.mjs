@@ -68,3 +68,68 @@ test('char-wise emoticon output resumes stable progress and preserves monotonic 
     }
     assert.ok(cutoff > text.indexOf('ゞ'));
 });
+
+test('atomic role receipt commits through the last standalone USER end line', () => {
+    const end = '<<<[END_ROLE_DIVIDE_USER]>>>';
+    const receipt = '<<<[ROLE_DIVIDE_USER]>>>\n'
+        + '[[VCP调用结果信息汇总:\n工具载荷中的定位符:\n'
+        + end + '\n更多工具内容\nVCP调用结果结束]]\n'
+        + '[本轮工具调用摘要:]成功[本轮工具调用摘要结束]\n'
+        + end + '\n';
+    assert.equal(scan(receipt + '模型继续输出'), receipt.length);
+});
+
+test('trusted receipt seal overrides unmatched payload syntax only for stabilization', () => {
+    const end = '<<<[END_ROLE_DIVIDE_USER]>>>';
+    for (const payload of [
+        '[[VCP调用结果信息汇总:\n[[VCP调用结果信息汇总:\n不配对字面量\nVCP调用结果结束]]',
+        '```js\n未闭合围栏',
+        '<div>\n未闭合 HTML',
+    ]) {
+        const receipt = payload + '\n' + end + '\n';
+        assert.equal(scan(receipt + '后续正文'), receipt.length);
+    }
+});
+
+test('standalone receipt seal requires a completed line and rejects inline mentions', () => {
+    const end = '<<<[END_ROLE_DIVIDE_USER]>>>';
+    assert.equal(scan(end), 0);
+    assert.equal(scan(end + '不是独立行\n'), 0);
+    assert.equal(scan('引用 ' + end + '\n'), 0);
+    const paddedLine = ' \t' + end + ' \t\r\n';
+    assert.equal(scan(paddedLine), paddedLine.length);
+});
+
+test('trusted receipt cutoff stays monotonic during subsequent model output', () => {
+    const receipt = '工具回执\n<<<[END_ROLE_DIVIDE_USER]>>>\n';
+    let cutoff = scan(receipt);
+    assert.equal(cutoff, receipt.length);
+    for (const tail of ['后', '后文\n\n第二段\n\n第三段', '后文\n\n第二段\n\n第三段`未闭合']) {
+        const text = receipt + tail;
+        const next = scan(text, cutoff);
+        assert.ok(next >= cutoff && next <= text.length);
+        cutoff = next;
+    }
+});
+
+test('unknown emoticon backtick is released once its paragraph ends', () => {
+    // 白名单外的颜文字（testbug1.txt 首行）不能冻结整条消息的稳定区。
+    const text = '汪呜 (´；ω；`) 开头\n\n“引号”段落 [@tag]\n\n第三段\n\n第四段';
+    const domains = collectMarkdownCodeDomains(text, { includeUnclosedInline: true });
+    assert.equal(domains.length, 0);
+    // 保留 1 个安全段落：前两段进入稳定区，切点恰好落在第三段起点。
+    assert.equal(scan(text), text.indexOf('第三段'));
+
+    let cutoff = 0;
+    for (let end = 1; end <= text.length; end++) {
+        const next = scan(text.slice(0, end), cutoff);
+        assert.ok(next >= cutoff && next <= end);
+        cutoff = next;
+    }
+    assert.ok(cutoff > 0);
+
+    // 同一段落内仍在输出的未闭合反引号继续保守保护流尾。
+    const tail = 'A\n\nB\n\n说明 `<style> 尚未闭合';
+    assert.equal(scan(tail), 3);
+    assert.equal(collectMarkdownCodeDomains(tail, { includeUnclosedInline: true })[0].closed, false);
+});
