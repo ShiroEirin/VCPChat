@@ -17,6 +17,8 @@ module.exports = {
         projectForgeGetNode: invoke('project-forge:get-node', 'projectId', 'nodeId'),
         projectForgeRevertFile: invoke('project-forge:revert-file', 'payload'),
         projectForgeDeleteProject: invoke('project-forge:delete-project', 'projectId', 'signature'),
+        projectForgeAcceptProject: invoke('project-forge:accept-project', 'projectId', 'signature'),
+        projectForgeGetBlueprint: invoke('project-forge:get-blueprint', 'projectId'),
         onProjectForgeChanged: on('project-forge:changed'),
 
         // Git 侧栏

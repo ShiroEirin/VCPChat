@@ -56,9 +56,12 @@ function toast(message, type = 'info') {
     toastTimer = setTimeout(() => { el.hidden = true; }, type === 'error' ? 5000 : 2600);
 }
 
-function statusBadge(project) {
+function statusBadge(project, interactive = false) {
     if (project.deleted_at) return '<span class="badge deleted">已删除</span>';
     const s = project.status || 'active';
+    if (interactive && s === 'review') {
+        return `<button type="button" class="badge review project-accept" data-id="${escapeHtml(project.id)}" title="点击后再次确认，手动验收工程">待验收</button>`;
+    }
     return `<span class="badge ${escapeHtml(s)}">${escapeHtml(STATUS_LABEL[s] || s)}</span>`;
 }
 
@@ -201,9 +204,11 @@ function renderProjectList() {
         ul.innerHTML = '<li class="muted" style="padding:12px">没有工程。Agent 通过 ProjectForge CreateProject 创建后会出现在这里。</li>';
         return;
     }
+    // 整表重绘（验收、删除、changed 推送的自动刷新）保留用户当前的滚动位置
+    const scrollTop = ul.scrollTop;
     ul.innerHTML = list.map(p => `
         <li class="project-item${p.id === state.currentId ? ' active' : ''}${p.deleted_at ? ' deleted' : ''}" data-id="${escapeHtml(p.id)}">
-            <div class="row"><span class="name" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</span>${statusBadge(p)}</div>
+            <div class="row"><span class="name" title="${escapeHtml(p.name)}">${escapeHtml(p.name)}</span>${statusBadge(p, true)}</div>
             <div class="sub"><code>${escapeHtml(p.id)}</code> · ${escapeHtml(p.workspace_alias || '-')} · Todo ${escapeHtml(p.progress?.text || '无')}</div>
             <div class="sub meta-line">
                 <span>${p.stats?.nodeCount || 0} 次变动 · 最近 ${escapeHtml(fmtTime(p.stats?.lastAt || p.updated_at))}</span>
@@ -220,6 +225,7 @@ function renderProjectList() {
             </div>
             ${progressBar(p.progress)}
         </li>`).join('');
+    ul.scrollTop = scrollTop; // 同步回写，避免下一帧才恢复导致闪回顶部
 }
 
 // ============================ 工程详情 ============================
@@ -244,6 +250,7 @@ async function selectProject(projectId, { keepTab = false } = {}) {
     renderTimeline();
     renderFiles();
     renderReport();
+    if (document.querySelector('.tab.active')?.dataset.tab === 'blueprint') renderBlueprint({ force: true });
     if (!keepTab) switchTab('overview');
     $('history-results').innerHTML = '<p class="muted">输入条件后搜索本工程的变动历史。</p>';
 }
@@ -576,6 +583,55 @@ async function revertCurrent(mode) {
 function switchTab(name) {
     document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name));
     document.querySelectorAll('.tab-pane').forEach(p => p.classList.toggle('active', p.dataset.pane === name));
+    if (name === 'blueprint') renderBlueprint();
+}
+
+/** 工程图纸：动态画布（v 工程数据库实时投影，随施工自动生长）+ 手工精绘图（blueprints/{id}.html 存在时可切换）。
+ *  实时生长时：旧画布在 IPC 期间保持可见 → 离屏渲染 → 一次性替换 → 按阅读锚点还原滚动；并发调用只采纳最新一次。 */
+let bpRenderSeq = 0;
+async function renderBlueprint({ force = false } = {}) {
+    const pane = $('pane-blueprint');
+    const projectId = state.currentId;
+    if (!projectId) {
+        pane.innerHTML = '<p class="muted">未选择工程。</p>';
+        delete pane.dataset.loadedFor;
+        return;
+    }
+    if (!force && pane.dataset.loadedFor === projectId) return;
+    pane.dataset.loadedFor = projectId;
+    const seq = ++bpRenderSeq;
+    let manual = null;
+    try { manual = await call(api.projectForgeGetBlueprint(projectId)); } catch (_e) { manual = null; }
+    if (seq !== bpRenderSeq) return; // 已有更新的渲染请求，丢弃过期结果
+    const hasManual = !!(manual && manual.exists);
+    // bpGetViewMode / bpSetViewMode / renderBlueprintDynamic / bpCaptureScroll / bpRestoreScroll 来自 projectforge-blueprint.js（跨模块全局，与本文件其余兄弟模块同架构）
+    const mode = bpGetViewMode(projectId, hasManual);
+    const toggleHtml = hasManual ? `
+        <div class="bp-mode-bar">
+            <button class="bp-mode-btn${mode === 'dynamic' ? ' active' : ''}" data-bp-mode="dynamic" type="button">动态画布</button>
+            <button class="bp-mode-btn${mode === 'manual' ? ' active' : ''}" data-bp-mode="manual" type="button">精绘图</button>
+        </div>` : '';
+    if (mode === 'manual' && hasManual) {
+        pane.innerHTML = `${toggleHtml}<iframe class="bp-frame" src="../${escapeHtml(manual.relPath)}?t=${Date.now()}" title="改动脉络"></iframe>`;
+    } else {
+        const host = document.createElement('div');
+        host.className = 'bp-host';
+        host.dataset.project = projectId;
+        await renderBlueprintDynamic(host, projectId);
+        if (seq !== bpRenderSeq) return;
+        // 替换前一刻才取锚点：IPC 期间旧画布仍可滚动；仅旧画布属于同一工程时还原，换工程从顶部开始
+        const oldHost = pane.querySelector('.bp-host');
+        const anchor = oldHost && oldHost.dataset.project === projectId ? bpCaptureScroll(oldHost) : null;
+        pane.innerHTML = toggleHtml;
+        pane.appendChild(host);
+        bpRestoreScroll(host, anchor);
+    }
+    pane.querySelectorAll('.bp-mode-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            bpSetViewMode(projectId, btn.dataset.bpMode);
+            renderBlueprint({ force: true });
+        });
+    });
 }
 
 function debounce(fn, wait) {
@@ -594,6 +650,24 @@ function bindEvents() {
     });
     $('project-search').addEventListener('input', debounce(renderProjectList, 120));
     $('include-deleted').addEventListener('change', loadProjects);
+
+    let activeAcceptButton = null;
+    let acceptTimer = null;
+    const accepting = new Set();
+    function collapseAccept() {
+        clearTimeout(acceptTimer);
+        if (activeAcceptButton && !activeAcceptButton.disabled) {
+            activeAcceptButton.textContent = '待验收';
+            activeAcceptButton.classList.remove('confirming');
+        }
+        activeAcceptButton = null;
+    }
+    document.addEventListener('click', e => {
+        if (activeAcceptButton && !activeAcceptButton.contains(e.target)) collapseAccept();
+    });
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape') collapseAccept();
+    });
 
     let activeDeleteWrap = null;
     let activeDeleteTimer = null;
@@ -616,6 +690,40 @@ function bindEvents() {
     });
 
     $('project-list').addEventListener('click', async e => {
+        const acceptBtn = e.target.closest('.project-accept');
+        if (acceptBtn) {
+            e.stopPropagation();
+            const projectId = acceptBtn.dataset.id;
+            if (!projectId || accepting.has(projectId)) return;
+            if (activeAcceptButton !== acceptBtn) {
+                collapseAccept();
+                collapseActiveDelete();
+                activeAcceptButton = acceptBtn;
+                acceptBtn.textContent = '确认验收？';
+                acceptBtn.classList.add('confirming');
+                acceptTimer = setTimeout(collapseAccept, 3000);
+                return;
+            }
+            clearTimeout(acceptTimer);
+            activeAcceptButton = null;
+            accepting.add(projectId);
+            acceptBtn.disabled = true;
+            acceptBtn.textContent = '验收中…';
+            try {
+                await call(api.projectForgeAcceptProject(projectId, getSignature()));
+                toast('已由用户手动验收该工程', 'success');
+                await loadProjects();
+                if (state.currentId === projectId) await selectProject(projectId, { keepTab: true });
+            } catch (err) {
+                toast(`验收失败：${err.message}`, 'error');
+                acceptBtn.disabled = false;
+                acceptBtn.textContent = '待验收';
+                acceptBtn.classList.remove('confirming');
+            } finally {
+                accepting.delete(projectId);
+            }
+            return;
+        }
         const trigger = e.target.closest('.project-delete-trigger');
         if (trigger) {
             e.stopPropagation();
