@@ -155,7 +155,18 @@ function showContextMenu(event, messageItem, message) {
                     uiHelper.showToastNotification("无法发送群聊中止信号 (API不存在)。", "error");
                 }
             } else {
-                // --- 普通单聊中止逻辑 ---
+                // Explicit user Stop; automatic tool-return interruption never enters here.
+                contextMenuDependencies.cancelStreamAdmissionRelay?.(activeMessageId);
+                if (typeof electronAPI?.topicAdmissionCancelPending === 'function') {
+                    const scope = {
+                        itemType: 'agent',
+                        itemId: message.context?.agentId || message.agentId || currentSelectedItemVal.id,
+                        topicId: message.context?.topicId || message.topicId || currentTopicIdVal,
+                    };
+                    Promise.resolve(electronAPI.topicAdmissionCancelPending(scope)).then(receipt => {
+                        if (!receipt?.success) throw new Error(receipt?.error || receipt?.code || '取消未确认');
+                    }).catch(error => uiHelper.showToastNotification(`后续队列取消未确认：${error.message}`, 'error'));
+                }
                 console.log(`[ContextMenu] Attempting to interrupt AGENT message: ${activeMessageId}`);
                 if (contextMenuDependencies.interruptHandler && typeof contextMenuDependencies.interruptHandler.interrupt === 'function') {
                     const result = await contextMenuDependencies.interruptHandler.interrupt(activeMessageId);
@@ -466,8 +477,8 @@ function showContextMenu(event, messageItem, message) {
             regenerateOption.classList.add('context-menu-item', 'regenerate-text');
             regenerateOption.innerHTML = `<i class="fas fa-sync-alt"></i> 重新回复`;
             regenerateOption.onclick = () => {
-                handleRegenerateResponse(message);
                 closeContextMenu();
+                handleRegenerateResponse(message);
             };
             menu.appendChild(regenerateOption);
         }
@@ -477,18 +488,44 @@ function showContextMenu(event, messageItem, message) {
             const redoGroupOption = ownerDocument.createElement('div');
             redoGroupOption.classList.add('context-menu-item', 'regenerate-text');
             redoGroupOption.innerHTML = `<i class="fas fa-sync-alt"></i> 重新回复`;
-            redoGroupOption.onclick = () => {
+            redoGroupOption.onclick = async () => {
+                closeContextMenu();
                 const { electronAPI, uiHelper } = mainRefs;
                 const currentSelectedItem = mainRefs.currentSelectedItemRef.get();
                 const currentTopicId = mainRefs.currentTopicIdRef.get();
 
                 if (currentSelectedItem.type === 'group' && currentTopicId && message.id && message.agentId) {
+                    const historySnapshot = mainRefs.currentChatHistoryRef?.get?.() || [];
+                    const tailState = evaluateRegenerateTailState(historySnapshot, message.id);
+                    const enableConfirmation = mainRefs.globalSettingsRef?.get?.()?.enableRegenerateConfirmation !== false;
+
+                    if (enableConfirmation && tailState.found && !tailState.isLatestSubstantive) {
+                        const confirmed = await uiHelper.showConfirmDialog(
+                            `该消息后已有 ${tailState.subsequentCount} 条后续发言，重新回复将移除当前消息并在群聊末尾重新生成。是否继续？`,
+                            '重新回复确认',
+                            '继续',
+                            '取消',
+                            false
+                        );
+                        if (!confirmed) return;
+
+                        const activeItem = mainRefs.currentSelectedItemRef?.get?.();
+                        const activeTopicId = mainRefs.currentTopicIdRef?.get?.();
+                        if (
+                            !activeItem
+                            || activeItem.type !== 'group'
+                            || activeItem.id !== currentSelectedItem.id
+                            || activeTopicId !== currentTopicId
+                        ) {
+                            return;
+                        }
+                    }
+
                     // 调用新的IPC接口
                     electronAPI.redoGroupChatMessage(currentSelectedItem.id, currentTopicId, message.id, message.agentId);
                 } else {
                     uiHelper.showToastNotification("无法重新回复：缺少群聊上下文信息。", "error");
                 }
-                closeContextMenu();
             };
             menu.appendChild(redoGroupOption);
         }
@@ -854,13 +891,70 @@ function describeLiveReferenceForContext(data) {
 }
 
 
+function evaluateRegenerateTailState(historyArray, targetMessageId) {
+    if (!Array.isArray(historyArray) || !targetMessageId) {
+        return { found: false, index: -1, isLatestSubstantive: true, subsequentCount: 0 };
+    }
+    const index = historyArray.findIndex(msg => msg && msg.id === targetMessageId);
+    if (index === -1) {
+        return { found: false, index: -1, isLatestSubstantive: true, subsequentCount: 0 };
+    }
+
+    let subsequentCount = 0;
+    for (let i = index + 1; i < historyArray.length; i++) {
+        const msg = historyArray[i];
+        if (!msg) continue;
+        subsequentCount++;
+    }
+
+    return {
+        found: true,
+        index,
+        isLatestSubstantive: subsequentCount === 0,
+        subsequentCount,
+    };
+}
+
 async function handleRegenerateResponse(originalAssistantMessage) {
+    const { electronAPI, uiHelper } = mainRefs;
+    const selected = mainRefs.currentSelectedItemRef.get();
+    const topicId = mainRefs.currentTopicIdRef.get();
+    if (!selected?.id || selected.type !== 'agent' || !topicId) return;
+    const scope = { itemType: 'agent', itemId: selected.id, topicId };
+    const token = typeof electronAPI.topicAdmissionAcquire === 'function'
+        ? `regen_${Date.now()}_${Math.random().toString(36).slice(2)}` : null;
+    if (token) {
+        const acquired = await electronAPI.topicAdmissionAcquire(scope, token);
+        if (!acquired?.success) {
+            uiHelper.showToastNotification(`话题暂不可重新回复：${acquired?.error || acquired?.code || '占用中'}`, 'info');
+            return;
+        }
+    }
+    const lifecycle = { dispatched: false, streamOwned: false, saved: false };
+    try {
+        const active = mainRefs.currentSelectedItemRef.get();
+        if (active?.id !== scope.itemId || active.type !== scope.itemType
+            || mainRefs.currentTopicIdRef.get() !== scope.topicId) return;
+        return await handleRegenerateResponseOwned(originalAssistantMessage, token, lifecycle);
+    } finally {
+        if (token) {
+            if (!lifecycle.dispatched || lifecycle.saved) {
+                const result = await electronAPI.topicAdmissionRelease(scope, token, { saved: true });
+                if (!result?.success) console.error('[Regenerate] lease release failed', result);
+            } else if (!lifecycle.streamOwned) {
+                await electronAPI.topicAdmissionUncertain(scope, token, '重新回复已派发，终稿保存未确认');
+            }
+        }
+    }
+}
+
+async function handleRegenerateResponseOwned(originalAssistantMessage, admissionToken, lifecycle) {
     const { electronAPI, uiHelper } = mainRefs;
     if (contextMenuDependencies.isContextCompacting?.()) {
         uiHelper.showToastNotification('上下文正在压缩，请稍候', 'warning');
         return;
     }
-    const currentChatHistoryArray = mainRefs.currentChatHistoryRef.get();
+    let currentChatHistoryArray = mainRefs.currentChatHistoryRef.get();
     const currentSelectedItemVal = mainRefs.currentSelectedItemRef.get();
     const currentTopicIdVal = mainRefs.currentTopicIdRef.get();
     const globalSettingsVal = mainRefs.globalSettingsRef.get();
@@ -873,34 +967,92 @@ async function handleRegenerateResponse(originalAssistantMessage) {
         return;
     }
 
-    const originalMessageIndex = currentChatHistoryArray.findIndex(msg => msg.id === originalAssistantMessage.id);
+    // Visible stream projections carry UI-only fields and may omit durable metadata.
+    // Start from the authoritative history; only changes AFTER this read are conflicts.
+    if (typeof electronAPI.getChatHistory === 'function') {
+        const latest = await electronAPI.getChatHistory(currentSelectedItemVal.id, currentTopicIdVal);
+        if (!Array.isArray(latest)) {
+            uiHelper.showToastNotification('无法读取话题历史，重新回复未启动', 'error');
+            return;
+        }
+        currentChatHistoryArray = latest;
+    }
+    if (mainRefs.currentSelectedItemRef.get()?.id !== currentSelectedItemVal.id
+        || mainRefs.currentTopicIdRef.get() !== currentTopicIdVal) return;
+    let originalMessageIndex = currentChatHistoryArray.findIndex(msg => msg.id === originalAssistantMessage.id);
     if (originalMessageIndex === -1) return;
 
-    const effectiveHistory = effectiveContextHistory(currentChatHistoryArray);
+    let effectiveHistory = effectiveContextHistory(currentChatHistoryArray);
     if (!effectiveHistory.includes(currentChatHistoryArray[originalMessageIndex])) {
         uiHelper.showToastNotification('该回复已归入压缩快照；如需重新回复，请先从该消息创建分支', 'warning');
         return;
     }
-    const historyForRegeneration = effectiveContextHistory(currentChatHistoryArray.slice(0, originalMessageIndex));
 
-    // Remove original and subsequent messages from DOM and history
-    const messagesToRemove = currentChatHistoryArray.splice(originalMessageIndex);
-    mainRefs.currentChatHistoryRef.set([...currentChatHistoryArray]);
-    messagesToRemove.forEach(msg => contextMenuDependencies.removeMessageById(msg.id, false)); // false = don't save history again
+    const tailState = evaluateRegenerateTailState(currentChatHistoryArray, originalAssistantMessage.id);
+    const enableConfirmation = globalSettingsVal?.enableRegenerateConfirmation !== false;
+    if (enableConfirmation && tailState.found && !tailState.isLatestSubstantive) {
+        const confirmed = await uiHelper.showConfirmDialog(
+            `该消息后还有 ${tailState.subsequentCount} 条对话记录，重新回复将一并清除后续内容并重新生成。是否继续？`,
+            '重新回复确认',
+            '继续',
+            '取消',
+            false
+        );
+        if (!confirmed) return;
+
+        if (contextMenuDependencies.isContextCompacting?.()) {
+            uiHelper.showToastNotification('上下文正在压缩，请稍候', 'warning');
+            return;
+        }
+        const activeItem = mainRefs.currentSelectedItemRef?.get?.();
+        const activeTopicId = mainRefs.currentTopicIdRef?.get?.();
+        if (
+            !activeItem
+            || activeItem.type !== 'agent'
+            || activeItem.id !== currentSelectedItemVal.id
+            || activeTopicId !== currentTopicIdVal
+        ) {
+            return;
+        }
+
+        // Keep the authoritative snapshot that the user just confirmed.
+        originalMessageIndex = currentChatHistoryArray.findIndex(msg => msg.id === originalAssistantMessage.id);
+        if (originalMessageIndex === -1) return;
+
+        effectiveHistory = effectiveContextHistory(currentChatHistoryArray);
+        if (!effectiveHistory.includes(currentChatHistoryArray[originalMessageIndex])) {
+            uiHelper.showToastNotification('该回复已归入压缩快照；如需重新回复，请先从该消息创建分支', 'warning');
+            return;
+        }
+    }
+
+    const historyForRegeneration = effectiveContextHistory(currentChatHistoryArray.slice(0, originalMessageIndex));
+    const regenerationBaseline = structuredClone(currentChatHistoryArray);
+    const messagesToRemove = currentChatHistoryArray.slice(originalMessageIndex);
 
     if (currentSelectedItemVal.id && currentTopicIdVal) {
         try {
             if (!mainRefs.historyMutationAuthority) throw new Error('History mutation authority is required for regeneration');
-            await mainRefs.historyMutationAuthority.replace({
+            const commit = await mainRefs.historyMutationAuthority.mutate({
                 itemId: currentSelectedItemVal.id,
                 itemType: currentSelectedItemVal.type,
                 topicId: currentTopicIdVal,
                 category: 'regeneration-truncate',
-            }, currentChatHistoryArray);
+            }, latest => {
+                if (JSON.stringify(latest) !== JSON.stringify(regenerationBaseline)) {
+                    throw new Error('确认期间有新消息或历史修改，请重新点击“重新回复”');
+                }
+                return latest.slice(0, originalMessageIndex);
+            });
+            currentChatHistoryArray = [...commit.history];
         } catch (saveError) {
-            console.error("ContextMenu: Failed to save chat history after splice in regenerate:", saveError);
+            console.error('ContextMenu: Failed to commit regeneration truncation:', saveError);
+            uiHelper.showToastNotification(`重新生成未启动：${saveError.message}`, 'error');
+            return;
         }
     }
+    mainRefs.currentChatHistoryRef.set([...currentChatHistoryArray]);
+    messagesToRemove.forEach(msg => contextMenuDependencies.removeMessageById(msg.id, false));
 
     const regenerationThinkingMessage = {
         role: 'assistant',
@@ -1162,6 +1314,7 @@ async function handleRegenerateResponse(originalAssistantMessage) {
             agentId: currentSelectedItemVal.id,
             topicId: currentTopicIdVal,
             isGroupMessage: false,
+            ...(admissionToken ? { admissionToken } : {}),
         };
         const { messagesForVCP } = await assembleRequestMessages({
             electronAPI, tavernEngine: ownerWindow.TavernRulesEngine, agentConfig,
@@ -1198,6 +1351,8 @@ async function handleRegenerateResponse(originalAssistantMessage) {
             }, regenerationThinkingItem);
         }
 
+        lifecycle.streamOwned = streamingRequested && typeof startStreamFn === 'function';
+        lifecycle.dispatched = true;
         const vcpResult = await electronAPI.sendToVCP(
             globalSettingsVal.vcpServerUrl,
             globalSettingsVal.vcpApiKey,
@@ -1221,8 +1376,9 @@ async function handleRegenerateResponse(originalAssistantMessage) {
             }
         } else {
             // 非流式处理逻辑 - 参考 chatManager.js 的健壮实现
-            const { response, context } = vcpResult; // 【修复1】正确解构返回结果
-            const isForActiveChat = context && context.agentId === currentSelectedItemVal.id && context.topicId === currentTopicIdVal;
+            const response = vcpResult.response ?? vcpResult;
+            const isForActiveChat = mainRefs.currentSelectedItemRef.get()?.id === currentSelectedItemVal.id
+                && mainRefs.currentTopicIdRef.get() === currentTopicIdVal;
 
             if (isForActiveChat) {
                 contextMenuDependencies.removeMessageById(regenerationThinkingMessage.id, false); // 从UI和内存中移除"思考中"
@@ -1244,7 +1400,21 @@ async function handleRegenerateResponse(originalAssistantMessage) {
                     id: response.id || `msg_${Date.now()}_assistant_${Math.random().toString(36).substring(2, 9)}`
                 };
 
-                // 【修复2】采用更健壮的“读-改-写”模式
+                if (admissionToken && typeof electronAPI.topicAdmissionPersistAssistant === 'function') {
+                    assistantMessage.admissionToken = admissionToken;
+                    const saved = await electronAPI.topicAdmissionPersistAssistant({
+                        itemId: currentSelectedItemVal.id, itemType: 'agent', topicId: currentTopicIdVal,
+                    }, assistantMessage);
+                    if (!saved?.success) throw new Error(saved?.error || '重新回复终稿保存失败');
+                    lifecycle.saved = true;
+                    if (mainRefs.currentSelectedItemRef.get()?.id === currentSelectedItemVal.id
+                        && mainRefs.currentTopicIdRef.get() === currentTopicIdVal) {
+                        mainRefs.currentChatHistoryRef.set([...saved.history]);
+                        contextMenuDependencies.renderMessage(assistantMessage);
+                    }
+                    return;
+                }
+                // Legacy hosts keep their existing history mutation contract.
                 if (!mainRefs.historyMutationAuthority) throw new Error('History mutation authority is required for regeneration');
                 const commit = await mainRefs.historyMutationAuthority.mutate({
                     itemId: context.agentId,
@@ -1257,6 +1427,7 @@ async function handleRegenerateResponse(originalAssistantMessage) {
                     return finalHistory;
                 });
                 const finalHistory = [...commit.history];
+                lifecycle.saved = true;
 
                 if (isForActiveChat) {
                     mainRefs.currentChatHistoryRef.set(finalHistory);
@@ -1269,6 +1440,7 @@ async function handleRegenerateResponse(originalAssistantMessage) {
         }
 
     } catch (error) {
+        if (lifecycle.saved) throw error;
         if (streamingRequested && streamContext) {
             contextMenuDependencies.acceptStreamEvent?.({
                 type: 'error',
@@ -1277,21 +1449,26 @@ async function handleRegenerateResponse(originalAssistantMessage) {
                 context: streamContext,
             });
         } else {
-            const failedHistory = currentChatHistoryArray.filter(message => message.id !== regenerationThinkingMessage.id);
-            mainRefs.currentChatHistoryRef.set(failedHistory);
-            contextMenuDependencies.removeMessageById(regenerationThinkingMessage.id, false);
-            contextMenuDependencies.renderMessage({
-                role: 'system',
-                content: `客户端错误 (重新生成): ${error.message}`,
-                timestamp: Date.now(),
-            });
+            const isStillSelected = mainRefs.currentSelectedItemRef.get()?.id === currentSelectedItemVal.id
+                && mainRefs.currentTopicIdRef.get() === currentTopicIdVal;
+            if (isStillSelected) {
+                // Retract only our placeholder, never restore a stale snapshot over new messages.
+                mainRefs.currentChatHistoryRef.set(mainRefs.currentChatHistoryRef.get()
+                    .filter(message => message.id !== regenerationThinkingMessage.id));
+                contextMenuDependencies.removeMessageById(regenerationThinkingMessage.id, false);
+                contextMenuDependencies.renderMessage({
+                    role: 'system',
+                    content: `客户端错误 (重新生成): ${error.message}`,
+                    timestamp: Date.now(),
+                });
+            }
             if (currentSelectedItemVal.id && currentTopicIdVal && mainRefs.historyMutationAuthority) {
-                await mainRefs.historyMutationAuthority.replace({
+                await mainRefs.historyMutationAuthority.mutate({
                     itemId: currentSelectedItemVal.id,
                     itemType: currentSelectedItemVal.type,
                     topicId: currentTopicIdVal,
                     category: 'regeneration-failure-cleanup',
-                }, failedHistory);
+                }, latest => latest.filter(message => message.id !== regenerationThinkingMessage.id));
             }
         }
         uiHelper.scrollToBottom();
