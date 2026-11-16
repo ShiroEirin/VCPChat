@@ -15,6 +15,8 @@ export function createMainChatSendOwner({
     messageRenderer,
     notify,
     hasDraft = () => false,
+    isGroupQueueActive = () => false,
+    clearGroupQueueActive = null,
 }) {
     const defaultButtonHtml = button?.innerHTML || '';
     let disposed = false;
@@ -28,19 +30,17 @@ export function createMainChatSendOwner({
 
     const getInterruptibleMessage = () => {
         const history = historyRef.get();
-        for (let index = history.length - 1; index >= 0; index--) {
-            const message = history[index];
-            if (!message || message.role !== 'assistant') continue;
-            const item = messagesRoot?.querySelector(`.message-item[data-message-id="${message.id}"]`);
-            const isStreaming = Boolean(item?.classList.contains('streaming'));
-            if ((item?.isConnected && message.isThinking === true) || isStreaming) {
-                return { ...message, isStreaming };
-            }
-        }
-
         const messageId = streamProjection?.getActiveStreamingMessageId?.();
         const context = streamProjection?.getActiveStreamingContext?.();
-        if (!messageId || !isContextCurrent(context)) return null;
+        if (!messageId || !isContextCurrent(context)) {
+            const item = messagesRoot?.querySelector('.message-item.assistant.streaming, .message-item.assistant.thinking, .message-item.streaming');
+            if (!item?.isConnected) return null;
+            const isStreaming = item.classList.contains('streaming');
+            const message = history.find(entry => entry?.role === 'assistant'
+                && (item.dataset?.messageId ? entry.id === item.dataset.messageId : entry.isThinking === true));
+            return message && (isStreaming || message.isThinking === true)
+                ? { ...message, isStreaming } : null;
+        }
         const existing = history.find(message => message?.id === messageId && message.role === 'assistant');
         if (existing) return { ...existing, isStreaming: true };
         const selected = selectedItemRef.get();
@@ -55,6 +55,15 @@ export function createMainChatSendOwner({
             avatarColor: context.avatarColor || selected?.config?.avatarCalculatedColor,
             isStreaming: true,
         };
+    };
+
+    const getActiveGroupQueueScope = () => {
+        const selected = selectedItemRef.get();
+        const topicId = topicIdRef.get();
+        if (selected?.type !== 'group' || !selected.id || !topicId) return null;
+        return isGroupQueueActive(selected.id, topicId) === true
+            ? { groupId: selected.id, topicId }
+            : null;
     };
 
     const update = () => {
@@ -73,7 +82,8 @@ export function createMainChatSendOwner({
         }
         if (button.dataset.mode === 'compacting') button.disabled = false;
         const active = getInterruptibleMessage();
-        const mode = active && !hasDraft() ? 'interrupt' : 'send';
+        const activeQueue = active ? null : getActiveGroupQueueScope();
+        const mode = (active || activeQueue) && !hasDraft() ? 'interrupt' : 'send';
         button.dataset.mode = mode;
         button.classList.toggle('interrupt-mode', mode === 'interrupt');
         // The send control is the main-chat composer status surface. Keep its
@@ -88,8 +98,24 @@ export function createMainChatSendOwner({
     };
 
     const interrupt = async () => {
+        if (disposed) return false;
         const activeMessage = getInterruptibleMessage();
-        if (!activeMessage || disposed) return false;
+        if (!activeMessage) {
+            const activeQueue = getActiveGroupQueueScope();
+            if (!activeQueue) return false;
+            const queueResult = typeof chatAPI?.interruptGroupChatQueue === 'function'
+                ? await chatAPI.interruptGroupChatQueue(activeQueue.groupId, activeQueue.topicId)
+                : { success: false, error: '群聊队列中止接口不可用。' };
+            if (disposed) return false;
+            clearGroupQueueActive?.(activeQueue.groupId, activeQueue.topicId);
+            update();
+            if (queueResult?.success) {
+                notify?.(queueResult.message || '已停止后续群聊队列。', 'success');
+                return true;
+            }
+            notify?.(`中止失败：${queueResult?.error || '未知错误'}`, 'error');
+            return false;
+        }
         const selected = selectedItemRef.get();
         const isGroup = activeMessage.isGroupMessage === true || selected?.type === 'group';
         if (!isGroup) {
@@ -111,6 +137,10 @@ export function createMainChatSendOwner({
         }
         let result = { success: false, error: '无法发送中止请求。' };
         if (isGroup) {
+            clearGroupQueueActive?.(
+                activeMessage.groupId || activeMessage.context?.groupId || selected?.id,
+                activeMessage.topicId || activeMessage.context?.topicId || topicIdRef.get()
+            );
             result = typeof chatAPI?.interruptGroupRequest === 'function'
                 ? await chatAPI.interruptGroupRequest(activeMessage.id)
                 : { success: false, error: '群聊中止接口不可用。' };
@@ -154,7 +184,7 @@ export function createMainChatSendOwner({
                 else notify?.('压缩结果正在保存，无法撤销已开始的写入。', 'info');
                 return cancelled === true;
             }
-            if (getInterruptibleMessage() && !hasDraft()) return interrupt();
+            if ((getInterruptibleMessage() || getActiveGroupQueueScope()) && !hasDraft()) return interrupt();
             await getChatManager()?.handleSendMessage?.();
             return true;
         },

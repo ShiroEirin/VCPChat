@@ -73,11 +73,18 @@ function initialize(mainWindow, context) {
         return { error: `Agent config for ${agentId} not found.` };
     };
 
+    const notifyGroupTopicUpdated = payload => {
+        if (mainWindow && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+            mainWindow.webContents.send('vcp-group-topic-updated', payload);
+        }
+    };
+
     groupChat.initializeRuntimeServices({
         historyMutationQueue,
         topicAdmission,
         jevService,
-        getAgentConfigById
+        getAgentConfigById,
+        notifyTopicUpdated: notifyGroupTopicUpdated
     });
 
     if (gameService) {
@@ -248,7 +255,7 @@ function initialize(mainWindow, context) {
             return { success: true };
         } catch (error) {
             console.error(`[Main IPC] 保存群组 ${groupId} 话题 ${topicId} 聊天历史失败:`, error);
-            return { success: false, error: error.message };
+            return { success: false, error: error.message, code: error.code };
         }
     });
 
