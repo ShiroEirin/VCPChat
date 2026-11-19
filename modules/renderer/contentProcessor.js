@@ -2,6 +2,7 @@
 import * as cssTree from '../../node_modules/css-tree/dist/csstree.esm.js';
 import { replaceMarkdownCodeDomains } from './markdownCodeDomainScanner.js';
 import { createMathRenderer } from './mathRenderer.js';
+import { linkProseUrls } from './proseLinks.js';
 
 /** Creates one rendered-content interaction owner for one MessageRenderer instance. */
 export function createContentProcessor() {
@@ -192,21 +193,6 @@ function ensureNewlineAfterCodeBlock(text) {
     return text.replace(/^([ \t]{0,3}(?:`{3,}|~{3,})[^\S\r\n]*\w*)[^\S\r\n]+(\S.*)$/gm, '$1\n$2');
 }
 
-/**
- * Ensures that a tilde (~) is followed by a space, to prevent accidental strikethrough.
- * It avoids doing this for tildes inside URLs or file paths.
- * @param {string} text The input string.
- * @returns {string} The processed string with spaces after tildes where they were missing.
- */
-function ensureSpaceAfterTilde(text) {
-    if (typeof text !== 'string') return text;
-    // Replace a single tilde `~` with `~ ` to prevent it from being interpreted as a strikethrough marker.
-    // This should not affect tildes in URLs (e.g., `.../~user/`), home paths (`~/file`), or common code operators (`~=`, `~=`).
-    // The previous rule excluded tildes preceded by ASCII word chars, so the closing marker in `~text~`
-    // remained untouched (`~ text~`) and marked could still treat the pair as strikethrough in the main chat.
-    // Keep only the URL/path/operator exclusions and protect both the opening and closing single tilde.
-    return text.replace(/(^|[^/\\=~])~(?![\s~=/])/g, '$1~ ');
-}
 
 /**
  * Removes leading whitespace from lines starting with ``` (code block markers).
@@ -799,6 +785,7 @@ function setupHtmlPreview(preElement, htmlContent) {
     const frameId = `vcp-frame-${Math.random().toString(36).substr(2, 9)}`;
 
     const destroyPreview = () => {
+        clearOwnedTimeouts(preElement);
         if (messageHandler) {
             ownerWindow.removeEventListener('message', messageHandler);
             messageHandler = null;
@@ -912,9 +899,12 @@ function setupHtmlPreview(preElement, htmlContent) {
                 container.appendChild(previewFrame);
             }
 
-            // 🟢 延迟隐藏代码块，确保iframe先显示
+            // Only the opening that scheduled this callback may hide the source.
+            const openedFrame = previewFrame;
             scheduleOwnedTimeout(preElement, () => {
-                preElement.style.display = 'none';
+                if (previewFrame === openedFrame && container.classList.contains('preview-mode')) {
+                    preElement.style.display = 'none';
+                }
             }, 50);
 
         } else {
@@ -1249,6 +1239,9 @@ function processRenderedContent(contentDiv, settings = {}, { skipMath = false } 
     // 为超过 4 行的普通代码块添加复制按钮；HTML 预览块会与播放/返回按钮共用右上角工具栏
     setupCodeCopyButtons(contentDiv);
 
+    // AI 直接写的 HTML 不经过 Markdown 的裸链接规则，正文里的网址在这里补成链接
+    linkProseUrls(contentDiv);
+
     // Process interactive buttons, passing settings
     processInteractiveButtons(contentDiv, settings);
 
@@ -1372,8 +1365,7 @@ function applyContentProcessors(text) {
     return processedText
         // ensureNewlineAfterCodeBlock
         .replace(/^([ \t]{0,3}(?:`{3,}|~{3,})[^\S\r\n]*\w*)[^\S\r\n]+(\S.*)$/gm, '$1\n$2')
-        // ensureSpaceAfterTilde
-        .replace(/(^|[^/\\=~])~(?![\s~=/])/g, '$1~ ')
+
         // removeSpeakerTags - Simplified regex to remove all occurrences at the start
         .replace(/^(\[(?:(?!\]:\s).)*的发言\]:\s*)+/g, '')
         // ensureSeparatorBetweenImgAndCode
@@ -1492,7 +1484,7 @@ function cleanupPreviewsInContent(contentDiv) {
 const contentProcessor = Object.freeze({
     initializeContentProcessor,
     ensureNewlineAfterCodeBlock,
-    ensureSpaceAfterTilde,
+
     removeIndentationFromCodeBlockMarkers,
     removeSpeakerTags,
     ensureSeparatorBetweenImgAndCode,
